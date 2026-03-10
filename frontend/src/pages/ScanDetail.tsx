@@ -17,11 +17,11 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { bulkUpdateFindings, cancelScan, getFindings, getScan, getScans, rescan } from "../api/client";
+import ExportModal from "../components/ExportModal";
 import FindingGroup from "../components/FindingGroup";
 import ScanProgress from "../components/ScanProgress";
 import SeverityBadge from "../components/SeverityBadge";
 import type { FindingGroup as FindingGroupType, Scan, Severity } from "../types";
-import { exportFindingsToCsv } from "../utils/exportCsv";
 
 const SEVERITY_ORDER: Record<Severity, number> = {
   CRITICAL: 0,
@@ -42,6 +42,7 @@ export default function ScanDetail() {
   const [filterTools, setFilterTools] = useState<string[]>([]);
   const [showTriaged, setShowTriaged] = useState(false);
   const [selectedFindings, setSelectedFindings] = useState<Set<number>>(new Set());
+  const [showExportModal, setShowExportModal] = useState(false);
 
   const { data: scan, isLoading: scanLoading } = useQuery({
     queryKey: ["scan", scanId],
@@ -282,14 +283,14 @@ export default function ScanDetail() {
                   className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border border-zinc-300 text-zinc-600 hover:text-zinc-900 hover:border-zinc-400 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:border-zinc-500 transition-colors"
                 >
                   <Download size={13} />
-                  Export JSON
+                  Raw JSON
                 </button>
                 <button
-                  onClick={() => exportFindingsToCsv(scan, findings)}
-                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border border-zinc-300 text-zinc-600 hover:text-zinc-900 hover:border-zinc-400 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:border-zinc-500 transition-colors"
+                  onClick={() => setShowExportModal(true)}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
                 >
                   <Download size={13} />
-                  Export CSV
+                  Export
                 </button>
               </>
             )}
@@ -467,6 +468,15 @@ export default function ScanDetail() {
             Clear
           </button>
         </div>
+      )}
+
+      {/* Export Modal */}
+      {showExportModal && scan && (
+        <ExportModal
+          scan={scan}
+          findings={findings}
+          onClose={() => setShowExportModal(false)}
+        />
       )}
     </div>
   );
