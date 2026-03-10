@@ -1,0 +1,26 @@
+services:
+  backend:
+    build: ./backend
+    volumes:
+      - db_data:/app/data
+      - tools_bin:/app/tools_bin
+      # Mount the directory you want to scan.
+      # Set SCAN_ROOT in your .env file (e.g. SCAN_ROOT=C:/Users/you/code)
+      # Then enter /scans/<subfolder> as the path in the UI.
+      - ${SCAN_ROOT:-~}:/scans:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SASTY_DB_PATH=/app/data/sasty.db
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  tools_bin:
