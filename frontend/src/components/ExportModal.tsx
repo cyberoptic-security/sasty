@@ -1,11 +1,12 @@
 import clsx from "clsx";
 import { Check, ChevronDown, Download, X } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
-import type { Finding, Scan, Severity } from "../types";
+import type { Finding, Scan, Severity, TriageState } from "../types";
 import { exportFindingsToCsv } from "../utils/exportCsv";
+import { exportFindingsToDocx } from "../utils/exportDocx";
 import { exportFindingsToHtml } from "../utils/exportHtml";
 
-export type ExportFormat = "html" | "csv";
+export type ExportFormat = "docx-text" | "docx-table" | "html-text" | "html-table" | "csv";
 export type SortOrder = "severity" | "tool" | "both";
 
 export const ALL_EXPORT_FIELDS = [
@@ -66,36 +67,61 @@ interface Props {
   onClose: () => void;
 }
 
+type TriageFilterKey = TriageState | "open";
+
+const ALL_TRIAGE_FILTERS: { key: TriageFilterKey; label: string }[] = [
+  { key: "open", label: "Open" },
+  { key: "false_positive", label: "False Positive" },
+  { key: "test_dev", label: "Test / Dev" },
+  { key: "reported", label: "Reported" },
+];
+
 export default function ExportModal({ scan, findings, onClose }: Props) {
-  const [format, setFormat] = useState<ExportFormat>("html");
+  const [format, setFormat] = useState<ExportFormat>("docx-text");
   const [sortOrder, setSortOrder] = useState<SortOrder>("severity");
   const [selectedFields, setSelectedFields] = useState<Set<ExportField>>(
     new Set(ALL_EXPORT_FIELDS)
   );
+  const [triageFilters, setTriageFilters] = useState<Set<TriageFilterKey>>(
+    new Set(ALL_TRIAGE_FILTERS.map((t) => t.key))
+  );
 
-  // Group findings by tool
+  // Filter findings by triage status
+  const filteredFindings = useMemo(() => {
+    return findings.filter((f) => {
+      if (f.triage_state === null) return triageFilters.has("open");
+      return triageFilters.has(f.triage_state as TriageFilterKey);
+    });
+  }, [findings, triageFilters]);
+
+  // Group filtered findings by tool
   const toolGroups = useMemo(() => {
     const map = new Map<string, Finding[]>();
-    for (const f of findings) {
+    for (const f of filteredFindings) {
       if (!map.has(f.tool)) map.set(f.tool, []);
       map.get(f.tool)!.push(f);
     }
-    // Sort tools alphabetically, findings by severity within each
     const result = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
     for (const [, group] of result) {
       group.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
     }
     return result;
-  }, [findings]);
+  }, [filteredFindings]);
 
   const [selectedFindingIds, setSelectedFindingIds] = useState<Set<number>>(
     () => new Set(findings.map((f) => f.id))
   );
 
+  // When triage filters change, remove deselected findings from the selection
+  const effectiveSelectedIds = useMemo(() => {
+    const filteredIds = new Set(filteredFindings.map((f) => f.id));
+    return new Set([...selectedFindingIds].filter((id) => filteredIds.has(id)));
+  }, [selectedFindingIds, filteredFindings]);
+
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
 
-  const selectedCount = selectedFindingIds.size;
-  const totalCount = findings.length;
+  const selectedCount = effectiveSelectedIds.size;
+  const totalCount = filteredFindings.length;
 
   const toggleTool = useCallback(
     (tool: string) => {
@@ -136,11 +162,20 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
   }, []);
 
   const selectAll = useCallback(() => {
-    setSelectedFindingIds(new Set(findings.map((f) => f.id)));
-  }, [findings]);
+    setSelectedFindingIds(new Set(filteredFindings.map((f) => f.id)));
+  }, [filteredFindings]);
 
   const selectNone = useCallback(() => {
     setSelectedFindingIds(new Set());
+  }, []);
+
+  const toggleTriageFilter = useCallback((key: TriageFilterKey) => {
+    setTriageFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }, []);
 
   const toggleField = useCallback((field: ExportField) => {
@@ -153,18 +188,20 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
   }, []);
 
   const handleExport = useCallback(() => {
-    const selected = findings.filter((f) => selectedFindingIds.has(f.id));
+    const selected = filteredFindings.filter((f) => effectiveSelectedIds.has(f.id));
     const fields = ALL_EXPORT_FIELDS.filter((f) => selectedFields.has(f));
 
     if (selected.length === 0) return;
 
-    if (format === "html") {
-      exportFindingsToHtml(scan, selected, fields, sortOrder);
+    if (format === "docx-text" || format === "docx-table") {
+      exportFindingsToDocx(scan, selected, fields, sortOrder, format === "docx-text" ? "text" : "table");
+    } else if (format === "html-text" || format === "html-table") {
+      exportFindingsToHtml(scan, selected, fields, sortOrder, format === "html-text" ? "text" : "table");
     } else {
       exportFindingsToCsv(scan, selected, fields, sortOrder);
     }
     onClose();
-  }, [findings, selectedFindingIds, selectedFields, format, sortOrder, scan, onClose]);
+  }, [filteredFindings, effectiveSelectedIds, selectedFields, format, sortOrder, scan, onClose]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -190,19 +227,27 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
               <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
                 Format
               </label>
-              <div className="flex gap-2">
-                {(["html", "csv"] as ExportFormat[]).map((f) => (
+              <div className="flex gap-2 flex-wrap">
+                {(
+                  [
+                    ["docx-text", "Word Text"],
+                    ["docx-table", "Word Table"],
+                    ["html-text", "HTML Text"],
+                    ["html-table", "HTML Table"],
+                    ["csv", "CSV"],
+                  ] as [ExportFormat, string][]
+                ).map(([val, label]) => (
                   <button
-                    key={f}
-                    onClick={() => setFormat(f)}
+                    key={val}
+                    onClick={() => setFormat(val)}
                     className={clsx(
                       "px-3 py-1.5 text-sm rounded border transition-all",
-                      format === f
+                      format === val
                         ? "border-blue-400 bg-blue-50 text-blue-700 dark:border-blue-600 dark:bg-blue-950 dark:text-blue-300"
                         : "border-zinc-200 text-zinc-500 dark:border-zinc-700 dark:text-zinc-400 hover:border-zinc-300 dark:hover:border-zinc-600"
                     )}
                   >
-                    {f === "html" ? "HTML (Word-compatible)" : "CSV"}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -236,6 +281,34 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
             </div>
           </div>
 
+          {/* Triage Status Filter */}
+          <div>
+            <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-2 block">
+              Triage Status
+            </label>
+            <div className="flex gap-2 flex-wrap">
+              {ALL_TRIAGE_FILTERS.map(({ key, label }) => {
+                const count = findings.filter((f) =>
+                  key === "open" ? f.triage_state === null : f.triage_state === key
+                ).length;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => toggleTriageFilter(key)}
+                    className={clsx(
+                      "px-3 py-1.5 text-sm rounded border transition-all",
+                      triageFilters.has(key)
+                        ? "border-blue-400 bg-blue-50 text-blue-700 dark:border-blue-600 dark:bg-blue-950 dark:text-blue-300"
+                        : "border-zinc-200 text-zinc-400 dark:border-zinc-700 dark:text-zinc-500"
+                    )}
+                  >
+                    {label} <span className="text-xs opacity-60">({count})</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Finding Selection */}
           <div>
             <div className="flex items-center justify-between mb-2">
@@ -261,7 +334,7 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
             <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg overflow-hidden max-h-60 overflow-y-auto">
               {toolGroups.map(([tool, toolFindings]) => {
                 const toolSelectedCount = toolFindings.filter((f) =>
-                  selectedFindingIds.has(f.id)
+                  effectiveSelectedIds.has(f.id)
                 ).length;
                 const allToolSelected = toolSelectedCount === toolFindings.length;
                 const someToolSelected = toolSelectedCount > 0 && !allToolSelected;
@@ -312,7 +385,7 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
                           >
                             <input
                               type="checkbox"
-                              checked={selectedFindingIds.has(f.id)}
+                              checked={effectiveSelectedIds.has(f.id)}
                               onChange={() => toggleFinding(f.id)}
                               className="rounded border-zinc-300 text-blue-500 focus:ring-blue-500 dark:border-zinc-600"
                             />
@@ -396,7 +469,7 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
           <span className="text-xs text-zinc-400 dark:text-zinc-500">
             {selectedCount} finding{selectedCount !== 1 ? "s" : ""} &middot;{" "}
             {selectedFields.size} field{selectedFields.size !== 1 ? "s" : ""} &middot;{" "}
-            {format === "html" ? "HTML" : "CSV"}
+            {format === "csv" ? "CSV" : format.replace("-", " ").replace(/\b\w/g, (c) => c.toUpperCase())}
           </span>
           <div className="flex gap-2">
             <button
