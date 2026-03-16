@@ -195,6 +195,13 @@ def get_bandit_version() -> Optional[str]:
         return None
 
 
+def get_betterleaks_version() -> Optional[str]:
+    path = get_tool_path("betterleaks")
+    if not path:
+        return None
+    return _get_version([path, "version"])
+
+
 def get_trivy_version() -> Optional[str]:
     path = get_tool_path("trivy")
     if not path:
@@ -218,6 +225,54 @@ async def update_bandit() -> str:
         raise RuntimeError(stderr[:500])
     ver = get_bandit_version()
     return ver or "unknown"
+
+
+async def update_betterleaks() -> str:
+    """Download latest betterleaks binary from GitHub releases."""
+    system, arch = get_platform()
+    release = await _get_latest_release("betterleaks", "betterleaks")
+    version = release["tag_name"].lstrip("v")
+
+    if system == "windows":
+        asset_pattern = f"betterleaks_{version}_windows_x64.zip"
+        binary_name = "betterleaks.exe"
+    elif system == "darwin":
+        asset_pattern = f"betterleaks_{version}_darwin_{arch}.tar.gz"
+        binary_name = "betterleaks"
+    else:
+        asset_pattern = f"betterleaks_{version}_linux_x64.tar.gz"
+        binary_name = "betterleaks"
+
+    asset = next(
+        (a for a in release["assets"] if a["name"] == asset_pattern),
+        next((a for a in release["assets"] if system in a["name"].lower() and ("x64" in a["name"] or "amd64" in a["name"])), None),
+    )
+    if not asset:
+        raise RuntimeError(f"No betterleaks asset found for {system}/{arch}")
+
+    data = await _download_bytes(asset["browser_download_url"])
+    dest = TOOLS_DIR / binary_name
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        archive = tmp_path / asset["name"]
+        archive.write_bytes(data)
+
+        if asset["name"].endswith(".zip"):
+            with zipfile.ZipFile(archive) as zf:
+                members = [m for m in zf.namelist() if "betterleaks" in m.lower() and not m.endswith("/")]
+                zf.extract(members[0], tmp_path)
+                shutil.move(str(tmp_path / members[0]), str(dest))
+        else:
+            with tarfile.open(archive) as tf:
+                members = [m for m in tf.getmembers() if "betterleaks" in m.name and m.isfile()]
+                tf.extract(members[0], tmp_path)
+                shutil.move(str(tmp_path / members[0].name), str(dest))
+
+    if system != "windows":
+        _make_executable(dest)
+
+    return version
 
 
 async def update_trivy() -> str:
@@ -280,6 +335,7 @@ async def update_trivy() -> str:
 async def get_all_tool_status() -> list[dict]:
     semgrep_ver = get_semgrep_version()
     gitleaks_ver = get_gitleaks_version()
+    betterleaks_ver = get_betterleaks_version()
     hadolint_ver = get_hadolint_version()
     bandit_ver = get_bandit_version()
     trivy_ver = get_trivy_version()
@@ -296,6 +352,12 @@ async def get_all_tool_status() -> list[dict]:
             "description": "Secret and credential detection in source files",
             "current_version": gitleaks_ver,
             "installed": gitleaks_ver is not None,
+        },
+        {
+            "name": "betterleaks",
+            "description": "Advanced secret scanner (gitleaks successor) with archive & decode support",
+            "current_version": betterleaks_ver,
+            "installed": betterleaks_ver is not None,
         },
         {
             "name": "hadolint",

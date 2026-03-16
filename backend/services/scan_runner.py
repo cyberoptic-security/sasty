@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from models import Finding, Scan
 from services import tool_manager
-from services.parsers import bandit_parser, gitleaks_parser, hadolint_parser, semgrep_parser, trivy_parser
+from services.parsers import bandit_parser, betterleaks_parser, gitleaks_parser, hadolint_parser, semgrep_parser, trivy_parser
 
 logger = logging.getLogger(__name__)
 CONTEXT_LINES = 5
@@ -211,7 +211,7 @@ def _run_with_pty(cmd: list[str], on_output: callable = None, cancel_check: call
         return proc.returncode, output_lines
 
 
-def _run_semgrep(path: str, configs: list[str], on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None) -> list[dict]:
+def _run_semgrep(path: str, configs: list[str], on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
     if not configs:
         configs = ["auto"]
 
@@ -228,6 +228,8 @@ def _run_semgrep(path: str, configs: list[str], on_output: callable = None, canc
         ]
         for config in configs:
             cmd += ["--config", config]
+        if extra_args:
+            cmd.extend(extra_args)
         cmd.append(path)
 
         if on_output:
@@ -296,7 +298,7 @@ def _run_semgrep(path: str, configs: list[str], on_output: callable = None, canc
             pass
 
 
-def _run_gitleaks(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None) -> list[dict]:
+def _run_gitleaks(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
     gitleaks_path = tool_manager.get_tool_path("gitleaks")
     if not gitleaks_path:
         raise RuntimeError("gitleaks not found — use the Tools panel to download it")
@@ -316,6 +318,8 @@ def _run_gitleaks(path: str, on_output: callable = None, cancel_check: callable 
         ]
         if not is_git:
             cmd.append("--no-git")
+        if extra_args:
+            cmd.extend(extra_args)
         if on_output:
             file_counts = _count_source_files(path)
             total_files = sum(file_counts.values())
@@ -349,7 +353,61 @@ def _run_gitleaks(path: str, on_output: callable = None, cancel_check: callable 
             pass
 
 
-def _run_hadolint(path: str, on_output: callable = None, scan_id: int | None = None) -> list[dict]:
+def _run_betterleaks(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
+    betterleaks_path = tool_manager.get_tool_path("betterleaks")
+    if not betterleaks_path:
+        raise RuntimeError("betterleaks not found — use the Tools panel to download it")
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        report_path = f.name
+
+    try:
+        is_git = (Path(path) / ".git").is_dir()
+        subcmd = "git" if is_git else "dir"
+        cmd = [
+            betterleaks_path,
+            subcmd,
+            path,
+            "--report-format", "json",
+            "--report-path", report_path,
+            "--exit-code", "0",
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        if on_output:
+            file_counts = _count_source_files(path)
+            total_files = sum(file_counts.values())
+            on_output(f"Scanning {total_files} files for secrets & credentials (betterleaks)...")
+
+        _run_with_pty(cmd, on_output, cancel_check, timeout=120)
+
+        with open(report_path, "r") as f:
+            raw = f.read().strip()
+        if not raw:
+            return []
+
+        if scan_id is not None:
+            try:
+                raw_dir = get_raw_output_dir(scan_id)
+                (raw_dir / "betterleaks.json").write_text(raw, encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Could not save raw betterleaks output: {e}")
+
+        data = json.loads(raw)
+        return betterleaks_parser.parse(data) if isinstance(data, list) else []
+    except ScanCancelled:
+        raise
+    except json.JSONDecodeError:
+        return []
+    finally:
+        try:
+            os.unlink(report_path)
+        except OSError:
+            pass
+
+
+def _run_hadolint(path: str, on_output: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
     hadolint_path = tool_manager.get_tool_path("hadolint")
     if not hadolint_path:
         raise RuntimeError("hadolint not found — use the Tools panel to download it")
@@ -370,8 +428,12 @@ def _run_hadolint(path: str, on_output: callable = None, scan_id: int | None = N
     for dockerfile in dockerfiles:
         if on_output:
             on_output(f"Linting {os.path.relpath(dockerfile, path)}")
+        cmd = [hadolint_path, "--format", "json"]
+        if extra_args:
+            cmd.extend(extra_args)
+        cmd.append(dockerfile)
         result = subprocess.run(
-            [hadolint_path, "--format", "json", dockerfile],
+            cmd,
             capture_output=True, text=True, timeout=30,
         )
         try:
@@ -392,13 +454,15 @@ def _run_hadolint(path: str, on_output: callable = None, scan_id: int | None = N
     return all_findings
 
 
-def _run_bandit(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None) -> list[dict]:
+def _run_bandit(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
     """Run Bandit Python security scanner."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         output_path = f.name
 
     try:
         cmd = [sys.executable, "-m", "bandit", "-r", path, "-f", "json", "-o", output_path, "-q"]
+        if extra_args:
+            cmd.extend(extra_args)
 
         if on_output:
             on_output("Running Bandit Python security analysis...")
@@ -440,7 +504,7 @@ def _run_bandit(path: str, on_output: callable = None, cancel_check: callable = 
             pass
 
 
-def _run_trivy(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None) -> list[dict]:
+def _run_trivy(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
     """Run Trivy filesystem scanner for vulnerabilities and misconfigurations."""
     trivy_path = tool_manager.get_tool_path("trivy")
     if not trivy_path:
@@ -455,8 +519,10 @@ def _run_trivy(path: str, on_output: callable = None, cancel_check: callable = N
             "--format", "json",
             "--output", output_path,
             "--scanners", "vuln,misconfig",
-            path,
         ]
+        if extra_args:
+            cmd.extend(extra_args)
+        cmd.append(path)
 
         if on_output:
             on_output("Running Trivy vulnerability & misconfiguration scan...")
@@ -514,6 +580,7 @@ def _enrich_with_context(findings: list[dict], base_path: str):
 TOOL_RUNNERS = {
     "semgrep": _run_semgrep,
     "gitleaks": _run_gitleaks,
+    "betterleaks": _run_betterleaks,
     "hadolint": _run_hadolint,
     "bandit": _run_bandit,
     "trivy": _run_trivy,
@@ -535,18 +602,193 @@ def _set_progress(scan: Scan, db: Session, steps: list[dict], current: str | Non
     db.commit()
 
 
-def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], db: Session, triage_map: dict[str, str] | None = None):
+def _build_extra_args(tool_name: str, opts: dict) -> list[str]:
+    """Convert tool_options dict into CLI extra args for a scanner."""
+    args: list[str] = []
+    if not opts:
+        return args
+
+    # Common: extra_args is a freetext string of additional CLI flags
+    extra = opts.get("extra_args", "").strip()
+    if extra:
+        import shlex
+        args.extend(shlex.split(extra))
+
+    # Tool-specific boolean/value options
+    if tool_name == "semgrep":
+        if opts.get("exclude"):
+            for pattern in opts["exclude"].split(","):
+                p = pattern.strip()
+                if p:
+                    args.extend(["--exclude", p])
+        if opts.get("severity"):
+            args.extend(["--severity", opts["severity"]])
+        if opts.get("verbose"):
+            args.append("--verbose")
+    elif tool_name in ("gitleaks", "betterleaks"):
+        if opts.get("log_level"):
+            args.extend(["--log-level", opts["log_level"]])
+        if opts.get("config"):
+            args.extend(["--config", opts["config"]])
+        if tool_name == "betterleaks":
+            if opts.get("max_archive_depth"):
+                args.extend(["--max-archive-depth", str(opts["max_archive_depth"])])
+            if opts.get("max_decode_depth"):
+                args.extend(["--max-decode-depth", str(opts["max_decode_depth"])])
+    elif tool_name == "hadolint":
+        if opts.get("failure_threshold"):
+            args.extend(["--failure-threshold", opts["failure_threshold"]])
+        if opts.get("ignore"):
+            for rule in opts["ignore"].split(","):
+                r = rule.strip()
+                if r:
+                    args.extend(["--ignore", r])
+        if opts.get("trusted_registry"):
+            for reg in opts["trusted_registry"].split(","):
+                r = reg.strip()
+                if r:
+                    args.extend(["--trusted-registry", r])
+    elif tool_name == "bandit":
+        if opts.get("severity"):
+            level = opts["severity"].upper()
+            if level in ("LOW", "MEDIUM", "HIGH"):
+                args.extend(["-" + "l" * (1 + ["LOW", "MEDIUM", "HIGH"].index(level))])
+        if opts.get("confidence"):
+            level = opts["confidence"].upper()
+            if level in ("LOW", "MEDIUM", "HIGH"):
+                args.extend(["-" + "i" * (1 + ["LOW", "MEDIUM", "HIGH"].index(level))])
+        if opts.get("skip"):
+            args.extend(["--skip", opts["skip"]])
+        if opts.get("tests"):
+            args.extend(["--tests", opts["tests"]])
+    elif tool_name == "trivy":
+        if opts.get("severity"):
+            args.extend(["--severity", opts["severity"]])
+        if opts.get("ignore_unfixed"):
+            args.append("--ignore-unfixed")
+        if opts.get("scanners"):
+            args.extend(["--scanners", opts["scanners"]])
+
+    return args
+
+
+def _run_custom_command(path: str, command: str, tool_label: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None) -> list[dict]:
+    """Run a user-defined custom command and capture JSON output."""
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        output_path = f.name
+
+    # Replace placeholders in the command
+    cmd_str = command.replace("{path}", path).replace("{output}", output_path)
+
+    try:
+        if on_output:
+            on_output(f"Running custom command: {cmd_str}")
+
+        import shlex
+        if sys.platform == "win32":
+            # On Windows, run through shell
+            proc = subprocess.Popen(
+                cmd_str, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+        else:
+            cmd_parts = shlex.split(cmd_str)
+            proc = subprocess.Popen(
+                cmd_parts, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+
+        stderr_lines = []
+        import threading
+        def _drain_stderr():
+            for line in proc.stderr:
+                line = line.strip()
+                if line:
+                    stderr_lines.append(line)
+                    if on_output:
+                        on_output(line)
+        t = threading.Thread(target=_drain_stderr, daemon=True)
+        t.start()
+        output_lines = _read_lines(proc.stdout, on_output, cancel_check)
+        t.join(timeout=5)
+        proc.wait()
+
+        if on_output:
+            on_output(f"Custom command exited with code {proc.returncode}")
+
+        # Try to read JSON output file
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        except FileNotFoundError:
+            raw = ""
+
+        if not raw:
+            return []
+
+        if scan_id is not None:
+            try:
+                raw_dir = get_raw_output_dir(scan_id)
+                (raw_dir / f"custom_{tool_label}.json").write_text(raw, encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Could not save raw custom command output: {e}")
+
+        # Try to auto-detect and parse the output format
+        data = json.loads(raw)
+        from services.parsers import semgrep_parser, gitleaks_parser, hadolint_parser, bandit_parser, trivy_parser, betterleaks_parser
+
+        if isinstance(data, dict) and "results" in data:
+            results = data["results"]
+            if isinstance(results, list) and len(results) > 0 and "test_id" in results[0]:
+                return bandit_parser.parse(data)
+            return semgrep_parser.parse(data)
+        elif isinstance(data, dict) and "Results" in data:
+            return trivy_parser.parse(data)
+        elif isinstance(data, list) and len(data) > 0:
+            first = data[0]
+            if "RuleID" in first or "Match" in first or "Secret" in first:
+                return gitleaks_parser.parse(data)
+            elif "code" in first and "message" in first and "level" in first:
+                return hadolint_parser.parse(data)
+
+        # If we can't detect the format, return empty
+        if on_output:
+            on_output("Warning: could not auto-detect output format from custom command")
+        return []
+    except ScanCancelled:
+        raise
+    except json.JSONDecodeError:
+        if on_output:
+            on_output("Warning: custom command output was not valid JSON")
+        return []
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
+def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], db: Session, triage_map: dict[str, str] | None = None, tool_options: dict[str, dict] | None = None, custom_commands: list[dict] | None = None):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     scan.status = "running"
 
-    # Initialise progress — all steps pending
-    steps = [{"tool": t, "status": "pending", "findings": None, "error": None, "log_tail": []} for t in tools]
-    _set_progress(scan, db, steps, tools[0] if tools else None)
+    # Build the full tool list including custom commands
+    all_steps = list(tools)
+    custom_cmd_map: dict[str, dict] = {}
+    if custom_commands:
+        for idx, cmd_def in enumerate(custom_commands):
+            label = cmd_def.get("label", f"custom_{idx}")
+            step_key = f"custom:{label}"
+            all_steps.append(step_key)
+            custom_cmd_map[step_key] = cmd_def
 
+    # Initialise progress — all steps pending
+    steps = [{"tool": t, "status": "pending", "findings": None, "error": None, "log_tail": []} for t in all_steps]
+    _set_progress(scan, db, steps, all_steps[0] if all_steps else None)
+
+    tool_options = tool_options or {}
     all_findings: list[dict] = []
     errors: list[str] = []
 
-    for i, tool_name in enumerate(tools):
+    for i, tool_name in enumerate(all_steps):
         # Mark current step as running
         steps[i]["status"] = "running"
         _set_progress(scan, db, steps, tool_name)
@@ -564,22 +806,34 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
 
         cancel = lambda: _is_cancelled(scan_id)
 
+        # Get extra args for this tool from tool_options
+        opts = tool_options.get(tool_name, {})
+        extra_args = _build_extra_args(tool_name, opts)
+
         try:
             if cancel():
                 raise ScanCancelled()
-            if tool_name == "semgrep":
-                findings = _run_semgrep(path, semgrep_configs, on_output=_on_output, cancel_check=cancel, scan_id=scan_id)
+            if tool_name.startswith("custom:"):
+                cmd_def = custom_cmd_map[tool_name]
+                findings = _run_custom_command(
+                    path, cmd_def["command"], cmd_def.get("label", "custom"),
+                    on_output=_on_output, cancel_check=cancel, scan_id=scan_id,
+                )
+            elif tool_name == "semgrep":
+                findings = _run_semgrep(path, semgrep_configs, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "gitleaks":
-                findings = _run_gitleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id)
+                findings = _run_gitleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+            elif tool_name == "betterleaks":
+                findings = _run_betterleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "hadolint":
-                findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id)
+                findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "bandit":
-                findings = _run_bandit(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id)
+                findings = _run_bandit(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "trivy":
-                findings = _run_trivy(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id)
+                findings = _run_trivy(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
             else:
                 steps[i]["status"] = "skipped"
-                _set_progress(scan, db, steps, tools[i + 1] if i + 1 < len(tools) else None)
+                _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
                 continue
 
             _enrich_with_context(findings, path)
@@ -609,7 +863,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
             errors.append(f"{tool_name}: {msg}")
             logger.error(f"Scan {scan_id} tool error — {tool_name}: {msg}")
 
-        next_tool = tools[i + 1] if i + 1 < len(tools) else None
+        next_tool = all_steps[i + 1] if i + 1 < len(all_steps) else None
         _set_progress(scan, db, steps, next_tool)
 
     # Carry forward triage states from previous scan via fingerprint matching

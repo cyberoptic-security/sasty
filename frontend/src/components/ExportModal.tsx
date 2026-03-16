@@ -5,6 +5,7 @@ import type { Finding, Scan, Severity, TriageState } from "../types";
 import { exportFindingsToCsv } from "../utils/exportCsv";
 import { exportFindingsToDocx } from "../utils/exportDocx";
 import { exportFindingsToHtml } from "../utils/exportHtml";
+import { redactFindings } from "../utils/redact";
 
 export type ExportFormat = "docx-text" | "docx-table" | "html-text" | "html-table" | "csv";
 export type SortOrder = "severity" | "tool" | "both";
@@ -27,6 +28,8 @@ export const ALL_EXPORT_FIELDS = [
   "references",
   "fingerprint",
   "commit_hash",
+  "commit_author",
+  "commit_date",
   "triage_state",
 ] as const;
 
@@ -50,6 +53,8 @@ const FIELD_LABELS: Record<ExportField, string> = {
   references: "References",
   fingerprint: "Fingerprint",
   commit_hash: "Commit Hash",
+  commit_author: "Commit Author",
+  commit_date: "Commit Date",
   triage_state: "Triage State",
 };
 
@@ -85,6 +90,7 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
   const [triageFilters, setTriageFilters] = useState<Set<TriageFilterKey>>(
     new Set(ALL_TRIAGE_FILTERS.map((t) => t.key))
   );
+  const [redactSecrets, setRedactSecrets] = useState(false);
 
   // Filter findings by triage status
   const filteredFindings = useMemo(() => {
@@ -187,11 +193,15 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
     });
   }, []);
 
+  const [exportedJust, setExportedJust] = useState(false);
+
   const handleExport = useCallback(() => {
-    const selected = filteredFindings.filter((f) => effectiveSelectedIds.has(f.id));
+    const raw = filteredFindings.filter((f) => effectiveSelectedIds.has(f.id));
     const fields = ALL_EXPORT_FIELDS.filter((f) => selectedFields.has(f));
 
-    if (selected.length === 0) return;
+    if (raw.length === 0) return;
+
+    const selected = redactSecrets ? redactFindings(raw) : raw;
 
     if (format === "docx-text" || format === "docx-table") {
       exportFindingsToDocx(scan, selected, fields, sortOrder, format === "docx-text" ? "text" : "table");
@@ -200,8 +210,11 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
     } else {
       exportFindingsToCsv(scan, selected, fields, sortOrder);
     }
-    onClose();
-  }, [filteredFindings, effectiveSelectedIds, selectedFields, format, sortOrder, scan, onClose]);
+
+    // Show brief confirmation, then reset
+    setExportedJust(true);
+    setTimeout(() => setExportedJust(false), 2500);
+  }, [filteredFindings, effectiveSelectedIds, selectedFields, format, sortOrder, scan, redactSecrets]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -278,6 +291,34 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
                   </button>
                 ))}
               </div>
+            </div>
+          </div>
+
+          {/* Redact Secrets */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setRedactSecrets((v) => !v)}
+              className={clsx(
+                "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
+                redactSecrets
+                  ? "bg-blue-600 border-blue-600"
+                  : "bg-zinc-200 border-zinc-300 dark:bg-zinc-700 dark:border-zinc-600"
+              )}
+            >
+              <span
+                className={clsx(
+                  "inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform",
+                  redactSecrets ? "translate-x-[18px]" : "translate-x-[3px]"
+                )}
+              />
+            </button>
+            <div>
+              <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                Redact secrets
+              </span>
+              <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                Mask detected secrets in code and matched values, keeping first &amp; last characters
+              </p>
             </div>
           </div>
 
@@ -481,10 +522,15 @@ export default function ExportModal({ scan, findings, onClose }: Props) {
             <button
               onClick={handleExport}
               disabled={selectedCount === 0 || selectedFields.size === 0}
-              className="flex items-center gap-1.5 px-4 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className={clsx(
+                "flex items-center gap-1.5 px-4 py-1.5 text-sm rounded text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                exportedJust
+                  ? "bg-green-600 hover:bg-green-700"
+                  : "bg-blue-600 hover:bg-blue-700"
+              )}
             >
-              <Download size={14} />
-              Export
+              {exportedJust ? <Check size={14} /> : <Download size={14} />}
+              {exportedJust ? "Exported!" : "Export"}
             </button>
           </div>
         </div>

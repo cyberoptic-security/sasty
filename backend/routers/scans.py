@@ -24,17 +24,24 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2)
 
 
+class CustomCommand(BaseModel):
+    label: str
+    command: str
+
+
 class ScanCreate(BaseModel):
     path: str
     label: str | None = None
     tools: list[str] = ["semgrep", "gitleaks", "hadolint", "bandit", "trivy"]
     semgrep_configs: list[str] = ["auto"]
+    tool_options: dict[str, dict] | None = None
+    custom_commands: list[CustomCommand] | None = None
 
 
-def _scan_in_thread(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str]):
+def _scan_in_thread(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], tool_options: dict | None = None, custom_commands: list[dict] | None = None):
     db = SessionLocal()
     try:
-        run_scan(scan_id, path, tools, semgrep_configs, db)
+        run_scan(scan_id, path, tools, semgrep_configs, db, tool_options=tool_options, custom_commands=custom_commands)
     finally:
         db.close()
 
@@ -50,6 +57,8 @@ def create_scan(body: ScanCreate, background_tasks: BackgroundTasks, db: Session
     path = str(Path(body.path).resolve())
     if not Path(path).exists():
         raise HTTPException(status_code=400, detail=f"Path does not exist: {path}")
+
+    custom_cmds = [c.model_dump() for c in body.custom_commands] if body.custom_commands else None
 
     scan = Scan(
         path=path,
@@ -68,6 +77,8 @@ def create_scan(body: ScanCreate, background_tasks: BackgroundTasks, db: Session
         path,
         body.tools,
         body.semgrep_configs,
+        body.tool_options,
+        custom_cmds,
     )
 
     return _scan_to_dict(scan)
@@ -77,7 +88,7 @@ def create_scan(body: ScanCreate, background_tasks: BackgroundTasks, db: Session
 async def upload_scan(
     file: UploadFile = File(...),
     label: str = Form(""),
-    tools: str = Form("semgrep,gitleaks,hadolint,bandit,trivy"),
+    tools: str = Form("semgrep,gitleaks,betterleaks,hadolint,bandit,trivy"),
     semgrep_configs: str = Form("auto"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
@@ -247,7 +258,7 @@ async def import_scan(
         raise HTTPException(status_code=400, detail="Invalid JSON file")
 
     # Detect format and parse
-    from services.parsers import semgrep_parser, gitleaks_parser, hadolint_parser, bandit_parser, trivy_parser
+    from services.parsers import semgrep_parser, gitleaks_parser, betterleaks_parser, hadolint_parser, bandit_parser, trivy_parser
     from services.scan_runner import get_raw_output_dir, _enrich_with_context
 
     findings: list[dict] = []
@@ -269,7 +280,7 @@ async def import_scan(
     elif isinstance(data, list) and len(data) > 0:
         first = data[0]
         if "RuleID" in first or "Match" in first or "Secret" in first:
-            # Gitleaks format
+            # Gitleaks / betterleaks format (same structure — default to gitleaks)
             tool_name = "gitleaks"
             findings = gitleaks_parser.parse(data)
         elif "code" in first and "message" in first and "level" in first:
@@ -277,11 +288,11 @@ async def import_scan(
             tool_name = "hadolint"
             findings = hadolint_parser.parse(data)
         else:
-            raise HTTPException(status_code=400, detail="Unrecognised JSON format — expected semgrep, gitleaks, hadolint, bandit, or trivy output")
+            raise HTTPException(status_code=400, detail="Unrecognised JSON format — expected semgrep, gitleaks, betterleaks, hadolint, bandit, or trivy output")
     elif isinstance(data, list) and len(data) == 0:
         tool_name = "semgrep"
     else:
-        raise HTTPException(status_code=400, detail="Unrecognised JSON format — expected semgrep, gitleaks, hadolint, bandit, or trivy output")
+        raise HTTPException(status_code=400, detail="Unrecognised JSON format — expected semgrep, gitleaks, betterleaks, hadolint, bandit, or trivy output")
 
     scan_label = label.strip() or file.filename.rsplit(".", 1)[0]
 

@@ -40,6 +40,8 @@ const FIELD_HEADERS: Record<ExportField, string> = {
   references: "references",
   fingerprint: "fingerprint",
   commit_hash: "commit_hash",
+  commit_author: "commit_author",
+  commit_date: "commit_date",
   triage_state: "triage_state",
 };
 

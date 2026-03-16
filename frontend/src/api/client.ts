@@ -42,6 +42,8 @@ export const createScan = (body: {
   label?: string;
   tools: string[];
   semgrep_configs: string[];
+  tool_options?: Record<string, Record<string, string | boolean | number>>;
+  custom_commands?: { label: string; command: string }[];
 }) =>
   request<Scan>("/scans", {
     method: "POST",

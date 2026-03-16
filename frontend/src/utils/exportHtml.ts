@@ -69,6 +69,8 @@ const FIELD_LABELS: Record<ExportField, string> = {
   references: "References",
   fingerprint: "Fingerprint",
   commit_hash: "Commit Hash",
+  commit_author: "Commit Author",
+  commit_date: "Commit Date",
   triage_state: "Triage State",
 };
 
@@ -110,70 +112,148 @@ function renderCodeBlock(f: Finding): string {
   return "";
 }
 
-const TEXT_SKIP_IN_DETAIL: Set<ExportField> = new Set([
-  "severity", "tool", "rule_id", "rule_name", "message", "file_path",
-  "line_start", "line_end", "col_start", "col_end", "matched_code",
+/** Fields that vary per instance (shown for each occurrence). */
+const INSTANCE_FIELDS: Set<ExportField> = new Set([
+  "file_path", "line_start", "line_end", "col_start", "col_end",
+  "matched_code", "fingerprint", "commit_hash", "commit_author",
+  "commit_date", "triage_state",
 ]);
 
-function buildTextFinding(f: Finding, fields: ExportField[], index: number): string {
+interface ExportGroup {
+  rule_id: string;
+  rule_name?: string;
+  severity: Severity;
+  tool: string;
+  category?: string;
+  message: string;
+  cwe?: string[];
+  owasp?: string[];
+  references?: string[];
+  findings: Finding[];
+}
+
+function groupFindings(findings: Finding[]): ExportGroup[] {
+  const map = new Map<string, ExportGroup>();
+  for (const f of findings) {
+    const key = `${f.rule_id}__${f.tool}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        rule_id: f.rule_id,
+        rule_name: f.rule_name,
+        severity: f.severity,
+        tool: f.tool,
+        category: f.category,
+        message: f.message,
+        cwe: f.cwe,
+        owasp: f.owasp,
+        references: f.references,
+        findings: [],
+      });
+    }
+    map.get(key)!.findings.push(f);
+  }
+  return [...map.values()];
+}
+
+const TRIAGE_LABELS: Record<string, string> = {
+  false_positive: "False Positive",
+  test_dev: "Test / Dev",
+  reported: "Reported",
+};
+
+function buildTextGroup(group: ExportGroup, fields: ExportField[], index: number): string {
   const hasField = (field: ExportField) => fields.includes(field);
+  const count = group.findings.length;
   let html = "";
 
-  html += `<div style="margin-bottom:16px;padding:12px 16px;border:1px solid #e5e7eb;border-left:4px solid ${SEVERITY_COLORS[f.severity]};border-radius:4px;background:#ffffff;">`;
+  // ── Group header ──
+  html += `<div style="margin-bottom:20px;border:1px solid #e5e7eb;border-left:4px solid ${SEVERITY_COLORS[group.severity]};border-radius:4px;background:#ffffff;">`;
+  html += `<div style="padding:12px 16px;background:${SEVERITY_BG[group.severity]};border-bottom:1px solid #e5e7eb;">`;
 
-  html += `<div style="margin-bottom:6px;">`;
-  html += `<span style="font-size:10pt;color:#9ca3af;margin-right:6px;">#${index}</span>`;
-  if (hasField("severity")) html += renderSeverityBadge(f.severity) + " ";
-  if (hasField("tool")) html += `<span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:600;color:#4b5563;background:#f3f4f6;border:1px solid #d1d5db;margin-left:4px;">${esc(f.tool)}</span> `;
-  if (hasField("rule_id")) html += `<span style="font-family:Consolas,'Courier New',monospace;font-size:10pt;color:#374151;font-weight:600;margin-left:4px;">${esc(f.rule_id)}</span>`;
-  if (hasField("rule_name") && f.rule_name) html += `<span style="color:#6b7280;font-size:10pt;margin-left:6px;">(${esc(f.rule_name)})</span>`;
+  html += `<div style="margin-bottom:4px;">`;
+  if (hasField("severity")) html += renderSeverityBadge(group.severity) + " ";
+  if (hasField("tool")) html += `<span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:600;color:#4b5563;background:#f3f4f6;border:1px solid #d1d5db;margin-left:4px;">${esc(group.tool)}</span> `;
+  html += `<strong style="font-size:11pt;color:#111827;margin-left:4px;">${esc(group.rule_name || group.rule_id)}</strong>`;
+  html += `<span style="font-size:9pt;color:#9ca3af;margin-left:8px;">${count} instance${count !== 1 ? "s" : ""}</span>`;
   html += `</div>`;
 
-  if (hasField("message")) {
-    html += `<div style="margin:6px 0;font-size:10pt;color:#1f2937;line-height:1.4;">${esc(f.message)}</div>`;
+  if (hasField("rule_id") && group.rule_name) {
+    html += `<div style="font-family:Consolas,'Courier New',monospace;font-size:9pt;color:#2563eb;font-weight:600;margin:2px 0;">${esc(group.rule_id)}</div>`;
   }
 
-  if (hasField("file_path")) {
-    let loc = `<strong>${esc(f.file_path)}</strong>`;
-    if (hasField("line_start") && f.line_start) {
-      loc += `:${f.line_start}`;
-      if (hasField("line_end") && f.line_end && f.line_end !== f.line_start) {
-        loc += `-${f.line_end}`;
-      }
+  if (hasField("message") && group.message) {
+    html += `<div style="margin:6px 0;font-size:10pt;color:#1f2937;line-height:1.4;">${esc(group.message)}</div>`;
+  }
+
+  // Group-level metadata
+  const groupMeta: string[] = [];
+  if (hasField("category") && group.category) groupMeta.push(`<strong>Category:</strong> ${esc(group.category)}`);
+  if (hasField("cwe") && group.cwe?.length) groupMeta.push(`<strong>CWE:</strong> ${esc(group.cwe.join(", "))}`);
+  if (hasField("owasp") && group.owasp?.length) groupMeta.push(`<strong>OWASP:</strong> ${esc(group.owasp.join(", "))}`);
+  if (hasField("references") && group.references?.length) {
+    groupMeta.push(`<strong>References:</strong> ${group.references.map((r) => `<a href="${esc(r)}" style="color:#2563eb;font-size:9pt;">${esc(r)}</a>`).join(", ")}`);
+  }
+  if (groupMeta.length > 0) {
+    html += `<div style="font-size:9pt;color:#6b7280;margin-top:6px;line-height:1.6;">${groupMeta.join("<br>")}</div>`;
+  }
+
+  html += `</div>\n`; // close header
+
+  // ── Instances ──
+  for (let i = 0; i < group.findings.length; i++) {
+    const f = group.findings[i];
+    html += `<div style="padding:10px 16px 10px 24px;${i < group.findings.length - 1 ? "border-bottom:1px solid #f3f4f6;" : ""}">`;
+
+    // Instance sub-header
+    html += `<div style="margin-bottom:4px;">`;
+    html += `<span style="font-size:9pt;font-weight:600;color:#9ca3af;">Instance ${i + 1}</span>`;
+    if (hasField("triage_state") && f.triage_state) {
+      html += `<span style="font-size:9pt;color:#b45309;margin-left:8px;font-style:italic;"> &mdash; ${esc(TRIAGE_LABELS[f.triage_state] ?? f.triage_state)}</span>`;
     }
-    html += `<div style="font-family:Consolas,'Courier New',monospace;font-size:9pt;color:#4b5563;margin:4px 0;">${loc}</div>`;
-  }
+    html += `</div>`;
 
-  if (hasField("matched_code")) {
-    html += renderCodeBlock(f);
-  }
-
-  const extras: string[] = [];
-  for (const field of fields) {
-    if (TEXT_SKIP_IN_DETAIL.has(field)) continue;
-    const val = getFieldValue(f, field);
-    if (!val) continue;
-    if (field === "references") {
-      const refs = f.references ?? [];
-      if (refs.length > 0) {
-        extras.push(`<strong>${FIELD_LABELS[field]}:</strong> ${refs.map((r) => `<a href="${esc(r)}" style="color:#2563eb;font-size:9pt;">${esc(r)}</a>`).join(", ")}`);
+    // Location
+    if (hasField("file_path")) {
+      let loc = `<strong>${esc(f.file_path)}</strong>`;
+      if (hasField("line_start") && f.line_start) {
+        loc += `:${f.line_start}`;
+        if (hasField("line_end") && f.line_end && f.line_end !== f.line_start) {
+          loc += `-${f.line_end}`;
+        }
       }
-    } else {
-      extras.push(`<strong>${FIELD_LABELS[field]}:</strong> ${esc(val)}`);
+      html += `<div style="font-family:Consolas,'Courier New',monospace;font-size:9pt;color:#4b5563;margin:4px 0;">${loc}</div>`;
     }
-  }
-  if (extras.length > 0) {
-    html += `<div style="font-size:9pt;color:#6b7280;margin-top:6px;line-height:1.6;">${extras.join("<br>")}</div>`;
+
+    // Code
+    if (hasField("matched_code")) {
+      html += renderCodeBlock(f);
+    }
+
+    // Instance-level metadata
+    const instanceMeta: string[] = [];
+    const skipInInstance = new Set<ExportField>(["file_path", "line_start", "line_end", "col_start", "col_end", "matched_code", "triage_state"]);
+    for (const field of fields) {
+      if (!INSTANCE_FIELDS.has(field) || skipInInstance.has(field)) continue;
+      const val = getFieldValue(f, field);
+      if (!val) continue;
+      instanceMeta.push(`<strong>${FIELD_LABELS[field]}:</strong> ${esc(val)}`);
+    }
+    if (instanceMeta.length > 0) {
+      html += `<div style="font-size:9pt;color:#6b7280;margin-top:4px;line-height:1.5;">${instanceMeta.join(" &nbsp;|&nbsp; ")}</div>`;
+    }
+
+    html += `</div>\n`;
   }
 
-  html += `</div>\n`;
+  html += `</div>\n`; // close group wrapper
   return html;
 }
 
 function buildTextLayout(findings: Finding[], fields: ExportField[]): string {
+  const groups = groupFindings(findings);
   let html = "";
-  for (let i = 0; i < findings.length; i++) {
-    html += buildTextFinding(findings[i], fields, i + 1);
+  for (let i = 0; i < groups.length; i++) {
+    html += buildTextGroup(groups[i], fields, i + 1);
   }
   return html;
 }

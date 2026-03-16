@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
-import { FileJson, GitBranch, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileJson, GitBranch, Plus, Terminal, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { checkGit, createScan, getInfo, importScan, uploadScan } from "../api/client";
 
-const TOOLS = ["semgrep", "gitleaks", "hadolint", "bandit", "trivy"] as const;
+const TOOLS = ["semgrep", "gitleaks", "betterleaks", "hadolint", "bandit", "trivy"] as const;
 
 const SEMGREP_CONFIGS = [
   { id: "auto", label: "Auto (recommended)" },
@@ -17,7 +17,77 @@ const SEMGREP_CONFIGS = [
   { id: "p/owasp-top-ten", label: "OWASP Top 10" },
 ];
 
+// Per-tool option definitions: known CLI flags with types
+interface ToolOptionDef {
+  key: string;
+  label: string;
+  type: "toggle" | "text" | "select";
+  placeholder?: string;
+  choices?: { value: string; label: string }[];
+  hint?: string;
+}
+
+const TOOL_OPTIONS: Record<string, ToolOptionDef[]> = {
+  semgrep: [
+    { key: "severity", label: "Min Severity", type: "select", choices: [
+      { value: "", label: "Default" }, { value: "ERROR", label: "Error" },
+      { value: "WARNING", label: "Warning" }, { value: "INFO", label: "Info" },
+    ]},
+    { key: "exclude", label: "Exclude Patterns", type: "text", placeholder: "test/,*.min.js", hint: "Comma-separated glob patterns" },
+    { key: "verbose", label: "Verbose Output", type: "toggle" },
+  ],
+  gitleaks: [
+    { key: "log_level", label: "Log Level", type: "select", choices: [
+      { value: "", label: "Default" }, { value: "debug", label: "Debug" },
+      { value: "info", label: "Info" }, { value: "warn", label: "Warn" },
+      { value: "error", label: "Error" },
+    ]},
+    { key: "config", label: "Config File Path", type: "text", placeholder: "/path/to/.gitleaks.toml" },
+  ],
+  betterleaks: [
+    { key: "log_level", label: "Log Level", type: "select", choices: [
+      { value: "", label: "Default" }, { value: "debug", label: "Debug" },
+      { value: "info", label: "Info" }, { value: "warn", label: "Warn" },
+      { value: "error", label: "Error" },
+    ]},
+    { key: "config", label: "Config File Path", type: "text", placeholder: "/path/to/config.toml" },
+    { key: "max_archive_depth", label: "Max Archive Depth", type: "text", placeholder: "0 (disabled by default)" },
+    { key: "max_decode_depth", label: "Max Decode Depth", type: "text", placeholder: "5" },
+  ],
+  hadolint: [
+    { key: "failure_threshold", label: "Failure Threshold", type: "select", choices: [
+      { value: "", label: "Default" }, { value: "error", label: "Error" },
+      { value: "warning", label: "Warning" }, { value: "info", label: "Info" },
+      { value: "style", label: "Style" },
+    ]},
+    { key: "ignore", label: "Ignore Rules", type: "text", placeholder: "DL3008,DL3009", hint: "Comma-separated rule IDs" },
+    { key: "trusted_registry", label: "Trusted Registries", type: "text", placeholder: "docker.io,gcr.io", hint: "Comma-separated" },
+  ],
+  bandit: [
+    { key: "severity", label: "Min Severity", type: "select", choices: [
+      { value: "", label: "Default (all)" }, { value: "LOW", label: "Low+" },
+      { value: "MEDIUM", label: "Medium+" }, { value: "HIGH", label: "High only" },
+    ]},
+    { key: "confidence", label: "Min Confidence", type: "select", choices: [
+      { value: "", label: "Default (all)" }, { value: "LOW", label: "Low+" },
+      { value: "MEDIUM", label: "Medium+" }, { value: "HIGH", label: "High only" },
+    ]},
+    { key: "skip", label: "Skip Tests", type: "text", placeholder: "B101,B601", hint: "Comma-separated test IDs" },
+    { key: "tests", label: "Only Run Tests", type: "text", placeholder: "B101,B102", hint: "Comma-separated test IDs" },
+  ],
+  trivy: [
+    { key: "severity", label: "Severities", type: "text", placeholder: "CRITICAL,HIGH,MEDIUM", hint: "Comma-separated" },
+    { key: "ignore_unfixed", label: "Ignore Unfixed", type: "toggle" },
+    { key: "scanners", label: "Scanners", type: "text", placeholder: "vuln,misconfig", hint: "Default: vuln,misconfig" },
+  ],
+};
+
 type Mode = "path" | "upload" | "import";
+
+interface CustomCmd {
+  label: string;
+  command: string;
+}
 
 interface Props {
   onClose: () => void;
@@ -38,11 +108,17 @@ export default function NewScanModal({ onClose }: Props) {
   const [path, setPath] = useState("");
   const [label, setLabel] = useState("");
   const [selectedTools, setSelectedTools] = useState<string[]>([...TOOLS]);
-  const [selectedConfigs, setSelectedConfigs] = useState<string[]>([
-    "auto",
-  ]);
+  const [selectedConfigs, setSelectedConfigs] = useState<string[]>(["auto"]);
   const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null);
   const gitCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Scanner options state: { toolName: { optionKey: value } }
+  const [toolOptions, setToolOptions] = useState<Record<string, Record<string, string | boolean>>>({});
+  const [showOptions, setShowOptions] = useState(false);
+
+  // Custom commands state
+  const [customCommands, setCustomCommands] = useState<CustomCmd[]>([]);
+  const [showCustom, setShowCustom] = useState(false);
 
   // Upload / import state
   const [file, setFile] = useState<File | null>(null);
@@ -135,15 +211,43 @@ export default function NewScanModal({ onClose }: Props) {
     );
   }
 
+  function setToolOption(tool: string, key: string, value: string | boolean) {
+    setToolOptions((prev) => ({
+      ...prev,
+      [tool]: { ...(prev[tool] || {}), [key]: value },
+    }));
+  }
+
+  // Build the tool_options payload (only non-empty values)
+  function buildToolOptions(): Record<string, Record<string, string | boolean | number>> | undefined {
+    const result: Record<string, Record<string, string | boolean | number>> = {};
+    let hasAny = false;
+    for (const [tool, opts] of Object.entries(toolOptions)) {
+      if (!selectedTools.includes(tool)) continue;
+      const filtered: Record<string, string | boolean | number> = {};
+      for (const [k, v] of Object.entries(opts)) {
+        if (v !== "" && v !== false) {
+          filtered[k] = v;
+          hasAny = true;
+        }
+      }
+      if (Object.keys(filtered).length > 0) result[tool] = filtered;
+    }
+    return hasAny ? result : undefined;
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (mode === "path") {
       if (!path.trim()) return;
+      const cmds = customCommands.filter((c) => c.label.trim() && c.command.trim());
       pathMutation.mutate({
         path: path.trim(),
         label: label.trim() || undefined,
         tools: selectedTools,
         semgrep_configs: selectedConfigs,
+        tool_options: buildToolOptions(),
+        custom_commands: cmds.length > 0 ? cmds : undefined,
       });
     } else if (mode === "upload") {
       if (!file) return;
@@ -185,9 +289,14 @@ export default function NewScanModal({ onClose }: Props) {
   const canSubmit =
     mode === "path" ? !!path.trim() : mode === "upload" ? !!file : !!importFile;
 
+  // Check if any tool options have been set (for indicator)
+  const hasOptionsSet = Object.values(toolOptions).some((opts) =>
+    Object.values(opts).some((v) => v !== "" && v !== false)
+  );
+
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="bg-white border border-zinc-200 dark:bg-zinc-900 dark:border-zinc-700 rounded-lg w-full max-w-lg shadow-2xl">
+      <div className="bg-white border border-zinc-200 dark:bg-zinc-900 dark:border-zinc-700 rounded-lg w-full max-w-lg shadow-2xl max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
           <h2 className="font-semibold text-lg">New Scan</h2>
           <button onClick={onClose} className="text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-300 transition-colors">
@@ -195,7 +304,7 @@ export default function NewScanModal({ onClose }: Props) {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+        <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto">
           {/* Mode tabs */}
           <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-800 rounded-lg p-1">
             {!isDocker && (
@@ -343,7 +452,7 @@ export default function NewScanModal({ onClose }: Props) {
                   <div>
                     <FileJson size={20} className="mx-auto text-zinc-400 dark:text-zinc-500 mb-2" />
                     <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                      Drop a semgrep, gitleaks, hadolint, bandit, or trivy JSON file
+                      Drop a semgrep, gitleaks, betterleaks, hadolint, bandit, or trivy JSON file
                     </p>
                     <p className="text-xs text-zinc-400 dark:text-zinc-600 mt-1">
                       Raw tool output (e.g. semgrep --json)
@@ -424,12 +533,176 @@ export default function NewScanModal({ onClose }: Props) {
                   </div>
                 </div>
               )}
+
+              {/* Scanner Options (collapsible) */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => setShowOptions(!showOptions)}
+                  className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors"
+                >
+                  <span className="flex items-center gap-2">
+                    {showOptions ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    Scanner Options
+                    {hasOptionsSet && (
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                    )}
+                  </span>
+                  <span className="text-xs text-zinc-400 dark:text-zinc-600">Optional</span>
+                </button>
+
+                {showOptions && (
+                  <div className="px-4 pb-4 space-y-4 border-t border-zinc-100 dark:border-zinc-800 pt-3">
+                    {selectedTools.filter((t) => TOOL_OPTIONS[t]).map((tool) => (
+                      <div key={tool}>
+                        <h4 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">
+                          {tool}
+                        </h4>
+                        <div className="space-y-2">
+                          {TOOL_OPTIONS[tool].map((opt) => (
+                            <div key={opt.key} className="flex items-start gap-2">
+                              {opt.type === "toggle" ? (
+                                <label className="flex items-center gap-2 cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={!!(toolOptions[tool]?.[opt.key])}
+                                    onChange={(e) => setToolOption(tool, opt.key, e.target.checked)}
+                                    className="accent-emerald-500"
+                                  />
+                                  <span className="text-sm">{opt.label}</span>
+                                </label>
+                              ) : opt.type === "select" ? (
+                                <div className="flex-1">
+                                  <label className="block text-xs text-zinc-500 dark:text-zinc-500 mb-0.5">{opt.label}</label>
+                                  <select
+                                    value={String(toolOptions[tool]?.[opt.key] ?? "")}
+                                    onChange={(e) => setToolOption(tool, opt.key, e.target.value)}
+                                    className="w-full bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-emerald-500"
+                                  >
+                                    {opt.choices!.map((c) => (
+                                      <option key={c.value} value={c.value}>{c.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ) : (
+                                <div className="flex-1">
+                                  <label className="block text-xs text-zinc-500 dark:text-zinc-500 mb-0.5">{opt.label}</label>
+                                  <input
+                                    type="text"
+                                    value={String(toolOptions[tool]?.[opt.key] ?? "")}
+                                    onChange={(e) => setToolOption(tool, opt.key, e.target.value)}
+                                    placeholder={opt.placeholder}
+                                    className="w-full bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
+                                  />
+                                  {opt.hint && (
+                                    <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">{opt.hint}</p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                          {/* Extra args freetext for every tool */}
+                          <div>
+                            <label className="block text-xs text-zinc-500 dark:text-zinc-500 mb-0.5">Extra CLI Flags</label>
+                            <input
+                              type="text"
+                              value={String(toolOptions[tool]?.["extra_args"] ?? "")}
+                              onChange={(e) => setToolOption(tool, "extra_args", e.target.value)}
+                              placeholder="e.g. --timeout 300 --debug"
+                              className="w-full bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
+                            />
+                            <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">Raw flags appended to the command</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    {selectedTools.filter((t) => TOOL_OPTIONS[t]).length === 0 && (
+                      <p className="text-sm text-zinc-400 dark:text-zinc-600">Select a tool above to configure its options.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Custom Commands (collapsible) */}
+              {mode === "path" && (
+                <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => setShowCustom(!showCustom)}
+                    className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors"
+                  >
+                    <span className="flex items-center gap-2">
+                      {showCustom ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      <Terminal size={14} />
+                      Custom Commands
+                      {customCommands.length > 0 && (
+                        <span className="text-xs bg-zinc-200 dark:bg-zinc-700 rounded px-1.5 py-0.5">
+                          {customCommands.length}
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-xs text-zinc-400 dark:text-zinc-600">Optional</span>
+                  </button>
+
+                  {showCustom && (
+                    <div className="px-4 pb-4 border-t border-zinc-100 dark:border-zinc-800 pt-3 space-y-3">
+                      <p className="text-xs text-zinc-400 dark:text-zinc-600">
+                        Run custom scanner commands. Use <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{path}"}</code> for the scan target and <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{output}"}</code> for the JSON output file. Output is auto-detected (semgrep/gitleaks/hadolint/bandit/trivy format).
+                      </p>
+
+                      {customCommands.map((cmd, idx) => (
+                        <div key={idx} className="space-y-1.5 bg-zinc-50 dark:bg-zinc-800/50 rounded p-2.5">
+                          <div className="flex gap-2 items-center">
+                            <input
+                              type="text"
+                              value={cmd.label}
+                              onChange={(e) => {
+                                const updated = [...customCommands];
+                                updated[idx] = { ...cmd, label: e.target.value };
+                                setCustomCommands(updated);
+                              }}
+                              placeholder="Label (e.g. eslint-security)"
+                              className="flex-1 bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-emerald-500 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setCustomCommands(customCommands.filter((_, i) => i !== idx))}
+                              className="text-zinc-400 hover:text-red-500 transition-colors p-1"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={cmd.command}
+                            onChange={(e) => {
+                              const updated = [...customCommands];
+                              updated[idx] = { ...cmd, command: e.target.value };
+                              setCustomCommands(updated);
+                            }}
+                            placeholder="e.g. eslint --format json -o {output} {path}"
+                            className="w-full bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
+                          />
+                        </div>
+                      ))}
+
+                      <button
+                        type="button"
+                        onClick={() => setCustomCommands([...customCommands, { label: "", command: "" }])}
+                        className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400 hover:text-emerald-500 transition-colors"
+                      >
+                        <Plus size={12} /> Add Command
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
 
           {mode === "import" && (
             <p className="text-xs text-zinc-400 dark:text-zinc-600">
-              The tool type is auto-detected from the JSON structure. Supports semgrep, gitleaks, hadolint, bandit, and trivy output.
+              The tool type is auto-detected from the JSON structure. Supports semgrep, gitleaks, betterleaks, hadolint, bandit, and trivy output.
             </p>
           )}
 
