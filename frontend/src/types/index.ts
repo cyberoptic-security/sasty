@@ -73,6 +73,8 @@ export interface Finding {
   owasp?: string[];
   references?: string[];
   triage_state: TriageState | null;
+  is_duplicate?: boolean;
+  duplicate_ids?: number[];
 }
 
 export interface FindingGroup {

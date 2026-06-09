@@ -84,4 +84,6 @@ def _finding_to_dict(f: Finding) -> dict:
         "owasp": f.owasp,
         "references": f.references,
         "triage_state": f.triage_state,
+        "is_duplicate": f.is_duplicate or False,
+        "duplicate_ids": f.duplicate_ids,
     }

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from models import Finding, Scan
 from services import tool_manager
-from services.parsers import bandit_parser, betterleaks_parser, gitleaks_parser, hadolint_parser, semgrep_parser, trivy_parser
+from services.parsers import bandit_parser, betterleaks_parser, gitleaks_parser, hadolint_parser, semgrep_parser, trivy_parser, trufflehog_parser
 
 logger = logging.getLogger(__name__)
 CONTEXT_LINES = 5
@@ -407,6 +407,62 @@ def _run_betterleaks(path: str, on_output: callable = None, cancel_check: callab
             pass
 
 
+def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
+    import threading
+    trufflehog_path = tool_manager.get_tool_path("trufflehog")
+    if not trufflehog_path:
+        raise RuntimeError("trufflehog not found — use the Tools panel to download it")
+
+    is_git = (Path(path) / ".git").is_dir()
+    if is_git:
+        git_uri = Path(path).as_uri()
+        cmd = [trufflehog_path, "git", git_uri, "--json", "--no-update"]
+    else:
+        cmd = [trufflehog_path, "filesystem", path, "--json", "--no-update"]
+
+    if extra_args:
+        cmd.extend(extra_args)
+
+    if on_output:
+        on_output("Scanning for credentials with live verification (trufflehog)...")
+
+    items: list[dict] = []
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def _drain_stderr():
+        for line in proc.stderr:
+            line = line.strip()
+            if line and on_output:
+                on_output(line)
+
+    t = threading.Thread(target=_drain_stderr, daemon=True)
+    t.start()
+
+    for line in proc.stdout:
+        if cancel_check and cancel_check():
+            proc.kill()
+            raise ScanCancelled()
+        line = line.strip()
+        if line and line.startswith("{"):
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+    t.join(timeout=5)
+    proc.wait()
+
+    if scan_id is not None:
+        try:
+            raw_dir = get_raw_output_dir(scan_id)
+            (raw_dir / "trufflehog.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Could not save raw trufflehog output: {e}")
+
+    return trufflehog_parser.parse(items)
+
+
 def _run_hadolint(path: str, on_output: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
     hadolint_path = tool_manager.get_tool_path("hadolint")
     if not hadolint_path:
@@ -635,6 +691,13 @@ def _build_extra_args(tool_name: str, opts: dict) -> list[str]:
                 args.extend(["--max-archive-depth", str(opts["max_archive_depth"])])
             if opts.get("max_decode_depth"):
                 args.extend(["--max-decode-depth", str(opts["max_decode_depth"])])
+    elif tool_name == "trufflehog":
+        if opts.get("only_verified"):
+            args.append("--only-verified")
+        if opts.get("include_detectors"):
+            args.extend(["--include-detectors", opts["include_detectors"]])
+        if opts.get("exclude_detectors"):
+            args.extend(["--exclude-detectors", opts["exclude_detectors"]])
     elif tool_name == "hadolint":
         if opts.get("failure_threshold"):
             args.extend(["--failure-threshold", opts["failure_threshold"]])
@@ -766,6 +829,37 @@ def _run_custom_command(path: str, command: str, tool_label: str, on_output: cal
             pass
 
 
+def _detect_duplicates(scan_id: int, db: Session):
+    """Flag findings from different tools that report the same file + line."""
+    from sqlalchemy.orm import attributes
+    findings = db.query(Finding).filter(Finding.scan_id == scan_id).all()
+
+    location_groups: dict[tuple, list] = {}
+    for f in findings:
+        if f.file_path and f.line_start is not None:
+            key = (f.file_path, f.line_start)
+            location_groups.setdefault(key, []).append(f)
+
+    duplicate_count = 0
+    for group in location_groups.values():
+        tools_in_group = {f.tool for f in group}
+        if len(tools_in_group) > 1:
+            for finding in group:
+                finding.is_duplicate = True
+                finding.duplicate_ids = [o.id for o in group if o.id != finding.id]
+                duplicate_count += 1
+
+    if duplicate_count > 0:
+        scan = db.query(Scan).filter(Scan.id == scan_id).first()
+        if scan and scan.summary:
+            updated_summary = dict(scan.summary)
+            updated_summary["duplicates"] = duplicate_count
+            scan.summary = updated_summary
+            flag_modified(scan, "summary")
+        db.commit()
+        logger.info(f"Scan {scan_id}: {duplicate_count} findings flagged as cross-tool duplicates")
+
+
 def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], db: Session, triage_map: dict[str, str] | None = None, tool_options: dict[str, dict] | None = None, custom_commands: list[dict] | None = None):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     scan.status = "running"
@@ -825,6 +919,8 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                 findings = _run_gitleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "betterleaks":
                 findings = _run_betterleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+            elif tool_name == "trufflehog":
+                findings = _run_trufflehog(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "hadolint":
                 findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
             elif tool_name == "bandit":
@@ -889,4 +985,6 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
     if errors:
         scan.error_log = "\n".join(errors)
     db.commit()
+
+    _detect_duplicates(scan_id, db)
     logger.info(f"Scan {scan_id} complete — {summary['total']} findings")

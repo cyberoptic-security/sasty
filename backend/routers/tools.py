@@ -15,8 +15,8 @@ async def list_tools():
 async def update_tool(name: str):
     updaters = {
         "semgrep": tool_manager.update_semgrep,
-        "gitleaks": tool_manager.update_gitleaks,
         "betterleaks": tool_manager.update_betterleaks,
+        "trufflehog": tool_manager.update_trufflehog,
         "hadolint": tool_manager.update_hadolint,
         "bandit": tool_manager.update_bandit,
         "trivy": tool_manager.update_trivy,

@@ -31,6 +31,7 @@ const TOOL_COLORS: Record<string, string> = {
   semgrep: "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-300 dark:border-blue-800",
   gitleaks: "bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-950 dark:text-orange-300 dark:border-orange-800",
   betterleaks: "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800",
+  trufflehog: "bg-rose-100 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:border-rose-800",
   hadolint: "bg-purple-100 text-purple-700 border-purple-200 dark:bg-purple-950 dark:text-purple-300 dark:border-purple-800",
 };
 
@@ -214,6 +215,14 @@ function FindingItem({ finding, scanId, selected, onToggle }: { finding: Finding
             {finding.triage_state && (
               <span className="text-xs bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-800 px-1.5 py-0.5 rounded">
                 {TRIAGE_LABELS[finding.triage_state]}
+              </span>
+            )}
+            {finding.is_duplicate && (
+              <span
+                className="text-xs bg-zinc-100 text-zinc-500 border border-zinc-300 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-600 px-1.5 py-0.5 rounded"
+                title={`Also reported by ${finding.duplicate_ids?.length ?? 0} other tool(s)`}
+              >
+                duplicate
               </span>
             )}
           </div>

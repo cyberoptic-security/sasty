@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { checkGit, createScan, getInfo, importScan, uploadScan } from "../api/client";
 
-const TOOLS = ["semgrep", "gitleaks", "betterleaks", "hadolint", "bandit", "trivy"] as const;
+const TOOLS = ["semgrep", "betterleaks", "trufflehog", "hadolint", "bandit", "trivy"] as const;
 
 const SEMGREP_CONFIGS = [
   { id: "auto", label: "Auto (recommended)" },
@@ -36,14 +36,6 @@ const TOOL_OPTIONS: Record<string, ToolOptionDef[]> = {
     { key: "exclude", label: "Exclude Patterns", type: "text", placeholder: "test/,*.min.js", hint: "Comma-separated glob patterns" },
     { key: "verbose", label: "Verbose Output", type: "toggle" },
   ],
-  gitleaks: [
-    { key: "log_level", label: "Log Level", type: "select", choices: [
-      { value: "", label: "Default" }, { value: "debug", label: "Debug" },
-      { value: "info", label: "Info" }, { value: "warn", label: "Warn" },
-      { value: "error", label: "Error" },
-    ]},
-    { key: "config", label: "Config File Path", type: "text", placeholder: "/path/to/.gitleaks.toml" },
-  ],
   betterleaks: [
     { key: "log_level", label: "Log Level", type: "select", choices: [
       { value: "", label: "Default" }, { value: "debug", label: "Debug" },
@@ -53,6 +45,11 @@ const TOOL_OPTIONS: Record<string, ToolOptionDef[]> = {
     { key: "config", label: "Config File Path", type: "text", placeholder: "/path/to/config.toml" },
     { key: "max_archive_depth", label: "Max Archive Depth", type: "text", placeholder: "0 (disabled by default)" },
     { key: "max_decode_depth", label: "Max Decode Depth", type: "text", placeholder: "5" },
+  ],
+  trufflehog: [
+    { key: "only_verified", label: "Verified Only", type: "toggle", hint: "Skip unverified findings (fewer results, higher confidence)" },
+    { key: "include_detectors", label: "Include Detectors", type: "text", placeholder: "AWS,GitHub,Slack", hint: "Comma-separated detector names" },
+    { key: "exclude_detectors", label: "Exclude Detectors", type: "text", placeholder: "GitHubOauth", hint: "Comma-separated detector names" },
   ],
   hadolint: [
     { key: "failure_threshold", label: "Failure Threshold", type: "select", choices: [

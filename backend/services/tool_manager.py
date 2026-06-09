@@ -52,11 +52,11 @@ def get_semgrep_version() -> Optional[str]:
         return None
 
 
-def get_gitleaks_version() -> Optional[str]:
-    path = get_tool_path("gitleaks")
+def get_trufflehog_version() -> Optional[str]:
+    path = get_tool_path("trufflehog")
     if not path:
         return None
-    return _get_version([path, "version"])
+    return _get_version([path, "--version"])
 
 
 def get_hadolint_version() -> Optional[str]:
@@ -87,27 +87,30 @@ def _make_executable(path: Path):
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-async def update_gitleaks() -> str:
+async def update_trufflehog() -> str:
+    """Download latest TruffleHog binary from GitHub releases."""
     system, arch = get_platform()
-    release = await _get_latest_release("gitleaks", "gitleaks")
+    release = await _get_latest_release("trufflesecurity", "trufflehog")
     version = release["tag_name"].lstrip("v")
 
     if system == "windows":
-        asset_pattern = f"gitleaks_{version}_windows_x64.zip"
-        binary_name = "gitleaks.exe"
+        asset_pattern = f"trufflehog_{version}_windows_amd64.zip"
+        binary_name = "trufflehog.exe"
     elif system == "darwin":
-        asset_pattern = f"gitleaks_{version}_darwin_{arch}.tar.gz"
-        binary_name = "gitleaks"
+        mac_arch = "arm64" if arch == "arm64" else "amd64"
+        asset_pattern = f"trufflehog_{version}_darwin_{mac_arch}.tar.gz"
+        binary_name = "trufflehog"
     else:
-        asset_pattern = f"gitleaks_{version}_linux_x64.tar.gz"
-        binary_name = "gitleaks"
+        linux_arch = "arm64" if arch == "arm64" else "amd64"
+        asset_pattern = f"trufflehog_{version}_linux_{linux_arch}.tar.gz"
+        binary_name = "trufflehog"
 
     asset = next(
         (a for a in release["assets"] if a["name"] == asset_pattern),
-        next((a for a in release["assets"] if system in a["name"].lower() and "x64" in a["name"]), None),
+        next((a for a in release["assets"] if system in a["name"].lower() and "amd64" in a["name"]), None),
     )
     if not asset:
-        raise RuntimeError(f"No gitleaks asset found for {system}/{arch}")
+        raise RuntimeError(f"No trufflehog asset found for {system}/{arch}")
 
     data = await _download_bytes(asset["browser_download_url"])
     dest = TOOLS_DIR / binary_name
@@ -119,12 +122,12 @@ async def update_gitleaks() -> str:
 
         if asset["name"].endswith(".zip"):
             with zipfile.ZipFile(archive) as zf:
-                members = [m for m in zf.namelist() if "gitleaks" in m.lower() and not m.endswith("/")]
+                members = [m for m in zf.namelist() if "trufflehog" in m.lower() and not m.endswith("/")]
                 zf.extract(members[0], tmp_path)
                 shutil.move(str(tmp_path / members[0]), str(dest))
         else:
             with tarfile.open(archive) as tf:
-                members = [m for m in tf.getmembers() if "gitleaks" in m.name and m.isfile()]
+                members = [m for m in tf.getmembers() if "trufflehog" in m.name and m.isfile()]
                 tf.extract(members[0], tmp_path)
                 shutil.move(str(tmp_path / members[0].name), str(dest))
 
@@ -334,8 +337,8 @@ async def update_trivy() -> str:
 
 async def get_all_tool_status() -> list[dict]:
     semgrep_ver = get_semgrep_version()
-    gitleaks_ver = get_gitleaks_version()
     betterleaks_ver = get_betterleaks_version()
+    trufflehog_ver = get_trufflehog_version()
     hadolint_ver = get_hadolint_version()
     bandit_ver = get_bandit_version()
     trivy_ver = get_trivy_version()
@@ -348,16 +351,16 @@ async def get_all_tool_status() -> list[dict]:
             "installed": semgrep_ver is not None,
         },
         {
-            "name": "gitleaks",
-            "description": "Secret and credential detection in source files",
-            "current_version": gitleaks_ver,
-            "installed": gitleaks_ver is not None,
-        },
-        {
             "name": "betterleaks",
-            "description": "Advanced secret scanner (gitleaks successor) with archive & decode support",
+            "description": "Secret & credential scanner with archive and decode support",
             "current_version": betterleaks_ver,
             "installed": betterleaks_ver is not None,
+        },
+        {
+            "name": "trufflehog",
+            "description": "Secret scanner with live credential verification against APIs",
+            "current_version": trufflehog_ver,
+            "installed": trufflehog_ver is not None,
         },
         {
             "name": "hadolint",

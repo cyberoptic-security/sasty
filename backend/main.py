@@ -27,6 +27,8 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE findings ADD COLUMN commit_date TEXT",
             "ALTER TABLE scans ADD COLUMN parent_scan_id INTEGER REFERENCES scans(id)",
             "ALTER TABLE scans ADD COLUMN version INTEGER DEFAULT 1",
+            "ALTER TABLE findings ADD COLUMN is_duplicate INTEGER DEFAULT 0",
+            "ALTER TABLE findings ADD COLUMN duplicate_ids JSON",
         ]:
             try:
                 conn.execute(text(stmt))

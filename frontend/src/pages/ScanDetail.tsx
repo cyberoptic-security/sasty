@@ -41,6 +41,7 @@ export default function ScanDetail() {
   const [filterSeverities, setFilterSeverities] = useState<Severity[]>([...ALL_SEVERITIES]);
   const [filterTools, setFilterTools] = useState<string[]>([]);
   const [showTriaged, setShowTriaged] = useState(false);
+  const [hideDuplicates, setHideDuplicates] = useState(false);
   const [selectedFindings, setSelectedFindings] = useState<Set<number>>(new Set());
   const [showExportModal, setShowExportModal] = useState(false);
 
@@ -124,20 +125,30 @@ export default function ScanDetail() {
     });
   }, []);
 
+  const duplicateCount = useMemo(
+    () => findings.filter((f) => f.is_duplicate).length,
+    [findings]
+  );
+
+  const visibleFindings = useMemo(
+    () => (hideDuplicates ? findings.filter((f) => !f.is_duplicate) : findings),
+    [findings, hideDuplicates]
+  );
+
   const toggleAllVisible = useCallback(() => {
     setSelectedFindings((prev) => {
-      const visibleIds = findings
+      const visibleIds = visibleFindings
         .filter((f) => filterSeverities.includes(f.severity) && (filterTools.length === 0 || filterTools.includes(f.tool)))
         .map((f) => f.id);
       const allSelected = visibleIds.every((id) => prev.has(id));
       if (allSelected) return new Set();
       return new Set(visibleIds);
     });
-  }, [findings, filterSeverities, filterTools]);
+  }, [visibleFindings, filterSeverities, filterTools]);
 
   const groups: FindingGroupType[] = useMemo(() => {
     const map = new Map<string, FindingGroupType>();
-    for (const finding of findings) {
+    for (const finding of visibleFindings) {
       const key = `${finding.rule_id}__${finding.tool}`;
       if (!map.has(key)) {
         map.set(key, {
@@ -162,7 +173,7 @@ export default function ScanDetail() {
     return [...map.values()].sort(
       (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]
     );
-  }, [findings]);
+  }, [visibleFindings]);
 
   const filteredGroups = useMemo(
     () =>
@@ -379,6 +390,21 @@ export default function ScanDetail() {
             )}
 
             <div className="ml-auto flex items-center gap-2">
+              {duplicateCount > 0 && (
+                <button
+                  onClick={() => setHideDuplicates((v) => !v)}
+                  className={clsx(
+                    "flex items-center gap-1.5 text-xs px-2 py-1 rounded border transition-all",
+                    hideDuplicates
+                      ? "border-zinc-400 text-zinc-700 bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:bg-zinc-800"
+                      : "border-zinc-200 text-zinc-400 dark:border-zinc-800 dark:text-zinc-600"
+                  )}
+                  title={`${duplicateCount} findings reported by multiple tools`}
+                >
+                  <Eye size={11} />
+                  {hideDuplicates ? "Showing" : "Hide"} duplicates ({duplicateCount})
+                </button>
+              )}
               <button
                 onClick={() => setShowTriaged((v) => !v)}
                 className={clsx(

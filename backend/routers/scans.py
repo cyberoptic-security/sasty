@@ -32,7 +32,7 @@ class CustomCommand(BaseModel):
 class ScanCreate(BaseModel):
     path: str
     label: str | None = None
-    tools: list[str] = ["semgrep", "gitleaks", "hadolint", "bandit", "trivy"]
+    tools: list[str] = ["semgrep", "betterleaks", "trufflehog", "hadolint", "bandit", "trivy"]
     semgrep_configs: list[str] = ["auto"]
     tool_options: dict[str, dict] | None = None
     custom_commands: list[CustomCommand] | None = None
@@ -88,7 +88,7 @@ def create_scan(body: ScanCreate, background_tasks: BackgroundTasks, db: Session
 async def upload_scan(
     file: UploadFile = File(...),
     label: str = Form(""),
-    tools: str = Form("semgrep,gitleaks,betterleaks,hadolint,bandit,trivy"),
+    tools: str = Form("semgrep,betterleaks,trufflehog,hadolint,bandit,trivy"),
     semgrep_configs: str = Form("auto"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),

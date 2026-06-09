@@ -58,4 +58,7 @@ class Finding(Base):
     fp_note = Column(Text, nullable=True)
     triage_state = Column(String, nullable=True)  # null=open, false_positive, test_dev, reported
 
+    is_duplicate = Column(Boolean, default=False)
+    duplicate_ids = Column(JSON, nullable=True)  # list of finding IDs that share the same location
+
     scan = relationship("Scan", back_populates="findings")
