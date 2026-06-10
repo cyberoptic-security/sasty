@@ -1,4 +1,5 @@
 import logging
+import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,11 +8,15 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.exc import SAWarning
 from database import engine, Base
 from routers import tools, scans, findings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Suppress harmless SQLAlchemy identity map warnings
+warnings.filterwarnings("ignore", category=SAWarning, message=".*Identity map already had an identity.*")
 
 
 @asynccontextmanager
