@@ -496,8 +496,7 @@ export default function NewScanModal({ onClose }: Props) {
                       />
                       <span className="text-sm font-mono">{tool}</span>
                     </label>
-                    );
-                  })}
+                  ))}
                 </div>
               </div>
 
