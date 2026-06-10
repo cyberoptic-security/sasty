@@ -883,8 +883,12 @@ def _detect_duplicates(scan_id: int, db: Session):
 
 
 def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], db: Session, triage_map: dict[str, str] | None = None, tool_options: dict[str, dict] | None = None, custom_commands: list[dict] | None = None):
-    scan = db.query(Scan).filter(Scan.id == scan_id).first()
-    scan.status = "running"
+    try:
+        scan = db.query(Scan).filter(Scan.id == scan_id).first()
+        scan.status = "running"
+    except Exception as e:
+        logger.error(f"Scan {scan_id}: failed to query/update scan status: {e}")
+        raise
 
     # Build the full tool list including custom commands
     all_steps = list(tools)
@@ -904,7 +908,8 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
     all_findings: list[dict] = []
     errors: list[str] = []
 
-    for i, tool_name in enumerate(all_steps):
+    try:
+        for i, tool_name in enumerate(all_steps):
         # Mark current step as running
         steps[i]["status"] = "running"
         _set_progress(scan, db, steps, tool_name)
@@ -981,8 +986,17 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
             errors.append(f"{tool_name}: {msg}")
             logger.error(f"Scan {scan_id} tool error — {tool_name}: {msg}")
 
-        next_tool = all_steps[i + 1] if i + 1 < len(all_steps) else None
-        _set_progress(scan, db, steps, next_tool)
+            next_tool = all_steps[i + 1] if i + 1 < len(all_steps) else None
+            _set_progress(scan, db, steps, next_tool)
+    except Exception as e:
+        logger.error(f"Scan {scan_id}: unexpected error during scan: {e}", exc_info=True)
+        scan.status = "failed"
+        scan.finished_at = datetime.utcnow()
+        scan.error_log = f"Unexpected error: {str(e)}"
+        scan.progress = copy.deepcopy({"steps": steps, "current_tool": None})
+        flag_modified(scan, "progress")
+        db.commit()
+        return
 
     # Carry forward triage states from previous scan via fingerprint matching
     if triage_map:
@@ -991,6 +1005,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
             if fp and fp in triage_map:
                 fd["triage_state"] = triage_map[fp]
 
+    logger.debug(f"Scan {scan_id}: adding {len(all_findings)} findings to database")
     for fd in all_findings:
         db.add(Finding(scan_id=scan_id, **fd))
 
@@ -1006,7 +1021,10 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
     scan.progress = {"steps": steps, "current_tool": None}
     if errors:
         scan.error_log = "\n".join(errors)
+
+    logger.debug(f"Scan {scan_id}: committing to database")
     db.commit()
+    logger.debug(f"Scan {scan_id}: database commit complete")
 
     _detect_duplicates(scan_id, db)
     logger.info(f"Scan {scan_id} complete — {summary['total']} findings")
