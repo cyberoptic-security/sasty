@@ -910,81 +910,81 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
 
     try:
         for i, tool_name in enumerate(all_steps):
-        # Mark current step as running
-        steps[i]["status"] = "running"
-        _set_progress(scan, db, steps, tool_name)
-        logger.info(f"Scan {scan_id}: running {tool_name}")
+            # Mark current step as running
+            steps[i]["status"] = "running"
+            _set_progress(scan, db, steps, tool_name)
+            logger.info(f"Scan {scan_id}: running {tool_name}")
 
-        # Live output callback — flushes log tail to DB every 2 seconds
-        last_flush = [_time.monotonic()]
+            # Live output callback — flushes log tail to DB every 2 seconds
+            last_flush = [_time.monotonic()]
 
-        def _on_output(line: str):
-            steps[i]["log_tail"] = (steps[i].get("log_tail") or [])[-(_LOG_TAIL_MAX - 1):] + [line]
-            now = _time.monotonic()
-            if now - last_flush[0] >= 2:
-                last_flush[0] = now
-                _set_progress(scan, db, steps, tool_name)
+            def _on_output(line: str):
+                steps[i]["log_tail"] = (steps[i].get("log_tail") or [])[-(_LOG_TAIL_MAX - 1):] + [line]
+                now = _time.monotonic()
+                if now - last_flush[0] >= 2:
+                    last_flush[0] = now
+                    _set_progress(scan, db, steps, tool_name)
 
-        cancel = lambda: _is_cancelled(scan_id)
+            cancel = lambda: _is_cancelled(scan_id)
 
-        # Get extra args for this tool from tool_options
-        opts = tool_options.get(tool_name, {})
-        extra_args = _build_extra_args(tool_name, opts)
+            # Get extra args for this tool from tool_options
+            opts = tool_options.get(tool_name, {})
+            extra_args = _build_extra_args(tool_name, opts)
 
-        try:
-            if cancel():
-                raise ScanCancelled()
-            if tool_name.startswith("custom:"):
-                cmd_def = custom_cmd_map[tool_name]
-                findings = _run_custom_command(
-                    path, cmd_def["command"], cmd_def.get("label", "custom"),
-                    on_output=_on_output, cancel_check=cancel, scan_id=scan_id,
-                )
-            elif tool_name == "semgrep":
-                findings = _run_semgrep(path, semgrep_configs, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
-            elif tool_name == "gitleaks":
-                findings = _run_gitleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
-            elif tool_name == "betterleaks":
-                findings = _run_betterleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
-            elif tool_name == "trufflehog":
-                findings = _run_trufflehog(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
-            elif tool_name == "hadolint":
-                findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
-            elif tool_name == "bandit":
-                findings = _run_bandit(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
-            elif tool_name == "trivy":
-                findings = _run_trivy(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
-            else:
-                steps[i]["status"] = "skipped"
-                _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
-                continue
+            try:
+                if cancel():
+                    raise ScanCancelled()
+                if tool_name.startswith("custom:"):
+                    cmd_def = custom_cmd_map[tool_name]
+                    findings = _run_custom_command(
+                        path, cmd_def["command"], cmd_def.get("label", "custom"),
+                        on_output=_on_output, cancel_check=cancel, scan_id=scan_id,
+                    )
+                elif tool_name == "semgrep":
+                    findings = _run_semgrep(path, semgrep_configs, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                elif tool_name == "gitleaks":
+                    findings = _run_gitleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                elif tool_name == "betterleaks":
+                    findings = _run_betterleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                elif tool_name == "trufflehog":
+                    findings = _run_trufflehog(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                elif tool_name == "hadolint":
+                    findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
+                elif tool_name == "bandit":
+                    findings = _run_bandit(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                elif tool_name == "trivy":
+                    findings = _run_trivy(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                else:
+                    steps[i]["status"] = "skipped"
+                    _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
+                    continue
 
-            _enrich_with_context(findings, path)
-            all_findings.extend(findings)
-            steps[i]["status"] = "done"
-            steps[i]["findings"] = len(findings)
-            logger.info(f"Scan {scan_id}: {tool_name} found {len(findings)} findings")
-        except ScanCancelled:
-            steps[i]["status"] = "error"
-            steps[i]["error"] = "Cancelled"
-            # Mark remaining steps as skipped
-            for j in range(i + 1, len(steps)):
-                steps[j]["status"] = "skipped"
-            _cancel_requested.discard(scan_id)
-            scan.status = "failed"
-            scan.finished_at = datetime.utcnow()
-            scan.error_log = "Scan cancelled by user"
-            scan.progress = copy.deepcopy({"steps": steps, "current_tool": None})
-            flag_modified(scan, "progress")
-            db.commit()
-            logger.info(f"Scan {scan_id} cancelled by user")
-            return
-        except Exception as e:
-            msg = str(e)
-            steps[i]["status"] = "error"
-            steps[i]["error"] = msg
-            errors.append(f"{tool_name}: {msg}")
-            logger.error(f"Scan {scan_id} tool error — {tool_name}: {msg}")
+                _enrich_with_context(findings, path)
+                all_findings.extend(findings)
+                steps[i]["status"] = "done"
+                steps[i]["findings"] = len(findings)
+                logger.info(f"Scan {scan_id}: {tool_name} found {len(findings)} findings")
+            except ScanCancelled:
+                steps[i]["status"] = "error"
+                steps[i]["error"] = "Cancelled"
+                # Mark remaining steps as skipped
+                for j in range(i + 1, len(steps)):
+                    steps[j]["status"] = "skipped"
+                _cancel_requested.discard(scan_id)
+                scan.status = "failed"
+                scan.finished_at = datetime.utcnow()
+                scan.error_log = "Scan cancelled by user"
+                scan.progress = copy.deepcopy({"steps": steps, "current_tool": None})
+                flag_modified(scan, "progress")
+                db.commit()
+                logger.info(f"Scan {scan_id} cancelled by user")
+                return
+            except Exception as e:
+                msg = str(e)
+                steps[i]["status"] = "error"
+                steps[i]["error"] = msg
+                errors.append(f"{tool_name}: {msg}")
+                logger.error(f"Scan {scan_id} tool error — {tool_name}: {msg}")
 
             next_tool = all_steps[i + 1] if i + 1 < len(all_steps) else None
             _set_progress(scan, db, steps, next_tool)
