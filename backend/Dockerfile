@@ -28,6 +28,12 @@ RUN TRIVY_VERSION=$(curl -s https://api.github.com/repos/aquasecurity/trivy/rele
     | tar xz -C /usr/local/bin trivy \
     && chmod +x /usr/local/bin/trivy
 
+# Install trufflehog
+RUN TRUFFLEHOG_VERSION=$(curl -s https://api.github.com/repos/trufflesecurity/trufflehog/releases/latest | jq -r '.tag_name' | tr -d 'v') \
+    && curl -sL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
+    | tar xz -C /usr/local/bin trufflehog \
+    && chmod +x /usr/local/bin/trufflehog
+
 COPY . .
 
 # Directories for persistent data (mounted as volumes in compose)
