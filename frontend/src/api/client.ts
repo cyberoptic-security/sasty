@@ -32,6 +32,8 @@ export const deleteScan = (id: number) =>
   request<void>(`/scans/${id}`, { method: "DELETE" });
 export const cancelScan = (id: number) =>
   request<{ status: string }>(`/scans/${id}/cancel`, { method: "POST" });
+export const resetScan = (id: number) =>
+  request<{ status: string; message: string }>(`/scans/${id}/reset`, { method: "POST" });
 export const rescan = (scanId: number, findingIds?: number[]) =>
   request<Scan>(`/scans/${scanId}/rescan`, {
     method: "POST",

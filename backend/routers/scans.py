@@ -389,6 +389,25 @@ def cancel_scan(scan_id: int, db: Session = Depends(get_db)):
     return {"status": "cancelling"}
 
 
+@router.post("/{scan_id}/reset")
+def reset_scan(scan_id: int, db: Session = Depends(get_db)):
+    """Force-reset a stuck scan that's hung in 'running' state."""
+    from datetime import datetime
+    scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.status != "running":
+        raise HTTPException(status_code=409, detail=f"Can only reset running scans (current status: {scan.status})")
+
+    scan.status = "failed"
+    scan.error_log = "Scan process hung or crashed — manually reset by user"
+    scan.finished_at = datetime.utcnow()
+    db.commit()
+
+    logger.info(f"Scan {scan_id} forcefully reset from running to failed")
+    return {"status": "reset", "message": "Scan marked as failed and can be deleted or re-run"}
+
+
 @router.delete("/{scan_id}", status_code=204)
 def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()

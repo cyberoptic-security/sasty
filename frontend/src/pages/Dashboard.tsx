@@ -7,13 +7,14 @@ import {
   Clock,
   Loader2,
   Plus,
+  RotateCcw,
   Settings,
   Trash2,
   XCircle,
 } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { deleteScan, getScans } from "../api/client";
+import { deleteScan, getScans, resetScan } from "../api/client";
 import NewScanModal from "../components/NewScanModal";
 import SeverityBadge from "../components/SeverityBadge";
 import ToolsPanel from "../components/ToolsPanel";
@@ -88,6 +89,11 @@ export default function Dashboard() {
 
   const deleteMutation = useMutation({
     mutationFn: deleteScan,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["scans"] }),
+  });
+
+  const resetMutation = useMutation({
+    mutationFn: resetScan,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["scans"] }),
   });
 
@@ -179,17 +185,33 @@ export default function Dashboard() {
           {fmt(scan.started_at)}
         </td>
         <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={() => {
-              if (confirm("Delete this scan and all its findings?")) {
-                deleteMutation.mutate(scan.id);
-              }
-            }}
-            disabled={scan.status === "running"}
-            className="text-zinc-300 hover:text-red-500 dark:text-zinc-700 dark:hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-          >
-            <Trash2 size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            {scan.status === "running" && (
+              <button
+                onClick={() => {
+                  if (confirm("Reset this stuck scan? It will be marked as failed.")) {
+                    resetMutation.mutate(scan.id);
+                  }
+                }}
+                disabled={resetMutation.isPending && resetMutation.variables === scan.id}
+                title="Reset stuck scan"
+                className="text-zinc-300 hover:text-amber-500 dark:text-zinc-700 dark:hover:text-amber-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <RotateCcw size={14} />
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (confirm("Delete this scan and all its findings?")) {
+                  deleteMutation.mutate(scan.id);
+                }
+              }}
+              disabled={scan.status === "running"}
+              className="text-zinc-300 hover:text-red-500 dark:text-zinc-700 dark:hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
         </td>
       </tr>
     );
