@@ -481,32 +481,21 @@ export default function NewScanModal({ onClose }: Props) {
                       <GitBranch size={11} /> Git repository
                     </span>
                   )}
-                  {mode === "path" && isGitRepo === false && (
-                    <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-                      <GitBranch size={11} /> Not a git repo — gitleaks skipped
-                    </span>
-                  )}
                 </div>
                 <div className="flex gap-3 flex-wrap">
-                  {TOOLS.map((tool) => {
-                    const disabled = mode === "path" && tool === "gitleaks" && isGitRepo === false;
-                    return (
-                      <label
-                        key={tool}
-                        className={clsx(
-                          "flex items-center gap-2 select-none",
-                          disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer"
-                        )}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selectedTools.includes(tool)}
-                          onChange={() => !disabled && toggleTool(tool)}
-                          disabled={disabled}
-                          className="accent-emerald-500"
-                        />
-                        <span className="text-sm font-mono">{tool}</span>
-                      </label>
+                  {TOOLS.map((tool) => (
+                    <label
+                      key={tool}
+                      className="flex items-center gap-2 select-none cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedTools.includes(tool)}
+                        onChange={() => toggleTool(tool)}
+                        className="accent-emerald-500"
+                      />
+                      <span className="text-sm font-mono">{tool}</span>
+                    </label>
                     );
                   })}
                 </div>
