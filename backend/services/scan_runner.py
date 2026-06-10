@@ -446,7 +446,23 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
 
     items: list[dict] = []
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+    def _drain_stdout():
+        for line in proc.stdout:
+            if cancel_check and cancel_check():
+                proc.kill()
+                raise ScanCancelled()
+            line = line.strip()
+            if line and line.startswith("{"):
+                try:
+                    item = json.loads(line)
+                    items.append(item)
+                    # Log to see if verified field is present
+                    if "verified" in item or "Verified" in item:
+                        logger.debug(f"Found verified field: {item.get('verified') or item.get('Verified')}")
+                except json.JSONDecodeError:
+                    pass
 
     def _drain_stderr():
         for line in proc.stderr:
@@ -454,26 +470,15 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
             if line and on_output:
                 on_output(line)
 
-    t = threading.Thread(target=_drain_stderr, daemon=True)
-    t.start()
+    stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
 
-    for line in proc.stdout:
-        if cancel_check and cancel_check():
-            proc.kill()
-            raise ScanCancelled()
-        line = line.strip()
-        if line and line.startswith("{"):
-            try:
-                item = json.loads(line)
-                items.append(item)
-                # Log to see if verified field is present
-                if "verified" in item or "Verified" in item:
-                    logger.debug(f"Found verified field: {item.get('verified') or item.get('Verified')}")
-            except json.JSONDecodeError:
-                pass
-
-    t.join(timeout=5)
-    proc.wait()
+    # Wait for both threads with timeout
+    stdout_thread.join(timeout=300)
+    stderr_thread.join(timeout=5)
+    proc.wait(timeout=10)
 
     if scan_id is not None:
         try:
