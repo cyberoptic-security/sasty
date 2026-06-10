@@ -30,16 +30,32 @@ def get_tool_path(name: str) -> Optional[str]:
     system, _ = get_platform()
     ext = ".exe" if system == "windows" else ""
     local = TOOLS_DIR / f"{name}{ext}"
+    # Check local first, but verify it's actually executable
     if local.exists():
-        return str(local)
+        try:
+            # Quick test to see if binary works
+            subprocess.run([str(local), "--version"], capture_output=True, timeout=5)
+            return str(local)
+        except Exception:
+            # Binary is corrupted or not executable, remove it and fall through
+            try:
+                local.unlink()
+            except Exception:
+                pass
+    # Fall back to system PATH
     return shutil.which(name)
 
 
 def _get_version(cmd: list[str]) -> Optional[str]:
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return res.stdout.strip() or res.stderr.strip()
-    except Exception:
+        output = res.stdout.strip() or res.stderr.strip()
+        if output:
+            return output
+        logger.warning(f"No output from version command: {cmd}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to get version for {cmd[0]}: {e}")
         return None
 
 
@@ -57,14 +73,21 @@ def get_trufflehog_version() -> Optional[str]:
     path = get_tool_path("trufflehog")
     if not path:
         return None
-    return _get_version([path, "--version"])
+    version = _get_version([path, "--version"])
+    # If version detection fails but binary exists, return a placeholder
+    if not version and path:
+        return "installed"
+    return version
 
 
 def get_hadolint_version() -> Optional[str]:
     path = get_tool_path("hadolint")
     if not path:
         return None
-    return _get_version([path, "--version"])
+    version = _get_version([path, "--version"])
+    if not version and path:
+        return "installed"
+    return version
 
 
 async def _get_latest_release(owner: str, repo: str) -> dict:
@@ -222,14 +245,20 @@ def get_betterleaks_version() -> Optional[str]:
     path = get_tool_path("betterleaks")
     if not path:
         return None
-    return _get_version([path, "version"])
+    version = _get_version([path, "version"])
+    if not version and path:
+        return "installed"
+    return version
 
 
 def get_trivy_version() -> Optional[str]:
     path = get_tool_path("trivy")
     if not path:
         return None
-    return _get_version([path, "version"])
+    version = _get_version([path, "version"])
+    if not version and path:
+        return "installed"
+    return version
 
 
 async def update_bandit() -> str:

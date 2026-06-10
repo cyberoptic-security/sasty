@@ -31,8 +31,14 @@ RUN TRIVY_VERSION=$(curl -s https://api.github.com/repos/aquasecurity/trivy/rele
 # Install trufflehog
 RUN TRUFFLEHOG_VERSION=$(curl -s https://api.github.com/repos/trufflesecurity/trufflehog/releases/latest | jq -r '.tag_name' | tr -d 'v') \
     && curl -sL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
-    | tar xz -C /usr/local/bin trufflehog \
-    && chmod +x /usr/local/bin/trufflehog
+    -o /tmp/trufflehog.tar.gz \
+    && tar tzf /tmp/trufflehog.tar.gz \
+    && tar xzf /tmp/trufflehog.tar.gz -C /tmp \
+    && ls -la /tmp | grep trufflehog \
+    && cp /tmp/trufflehog /usr/local/bin/trufflehog 2>/dev/null || find /tmp -name "trufflehog" -type f -exec cp {} /usr/local/bin/trufflehog \; \
+    && chmod +x /usr/local/bin/trufflehog \
+    && /usr/local/bin/trufflehog --version \
+    && rm -f /tmp/trufflehog.tar.gz /tmp/trufflehog
 
 COPY . .
 
