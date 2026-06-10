@@ -1,3 +1,4 @@
+import os
 import shutil
 import stat
 import platform
@@ -112,7 +113,9 @@ async def update_trufflehog() -> str:
     if not asset:
         raise RuntimeError(f"No trufflehog asset found for {system}/{arch}")
 
-    data = await _download_bytes(asset["browser_download_url"])
+    # Construct direct download URL to avoid potential redirect issues with browser_download_url
+    download_url = f"https://github.com/trufflesecurity/trufflehog/releases/download/v{version}/{asset['name']}"
+    data = await _download_bytes(download_url)
     dest = TOOLS_DIR / binary_name
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -123,13 +126,30 @@ async def update_trufflehog() -> str:
         if asset["name"].endswith(".zip"):
             with zipfile.ZipFile(archive) as zf:
                 members = [m for m in zf.namelist() if "trufflehog" in m.lower() and not m.endswith("/")]
+                if not members:
+                    raise RuntimeError("No trufflehog binary found in zip")
                 zf.extract(members[0], tmp_path)
-                shutil.move(str(tmp_path / members[0]), str(dest))
+                extracted_path = tmp_path / members[0]
+                if extracted_path.is_file():
+                    shutil.move(str(extracted_path), str(dest))
+                else:
+                    raise RuntimeError(f"Extracted path is not a file: {extracted_path}")
         else:
             with tarfile.open(archive) as tf:
-                members = [m for m in tf.getmembers() if "trufflehog" in m.name and m.isfile()]
-                tf.extract(members[0], tmp_path)
-                shutil.move(str(tmp_path / members[0].name), str(dest))
+                tf.extractall(tmp_path)
+            # Find the trufflehog binary in extracted files
+            found = False
+            for root, dirs, files in os.walk(tmp_path):
+                for file in files:
+                    if file == "trufflehog" or file == "trufflehog.exe":
+                        src = Path(root) / file
+                        shutil.move(str(src), str(dest))
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                raise RuntimeError("No trufflehog binary found in tar archive")
 
     if system != "windows":
         _make_executable(dest)
