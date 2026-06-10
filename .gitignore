@@ -12,3 +12,4 @@ frontend/dist/
 
 # Env
 .env
+.claude

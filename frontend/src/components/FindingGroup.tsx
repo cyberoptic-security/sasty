@@ -219,8 +219,14 @@ function FindingItem({ finding, scanId, selected, onToggle }: { finding: Finding
             )}
             {finding.is_duplicate && (
               <span
-                className="text-xs bg-zinc-100 text-zinc-500 border border-zinc-300 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-600 px-1.5 py-0.5 rounded"
-                title={`Also reported by ${finding.duplicate_ids?.length ?? 0} other tool(s)`}
+                className="text-xs bg-zinc-100 text-zinc-500 border border-zinc-300 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-600 px-1.5 py-0.5 rounded cursor-help"
+                title={
+                  finding.duplicate_ids?.length
+                    ? `Also reported by: ${Array.isArray(finding.duplicate_ids) && finding.duplicate_ids[0]?.tool
+                        ? finding.duplicate_ids.map((d: any) => d.tool).join(", ")
+                        : `${finding.duplicate_ids.length} other tool(s)`}`
+                    : "Duplicate"
+                }
               >
                 duplicate
               </span>

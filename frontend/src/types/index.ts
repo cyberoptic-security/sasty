@@ -74,7 +74,7 @@ export interface Finding {
   references?: string[];
   triage_state: TriageState | null;
   is_duplicate?: boolean;
-  duplicate_ids?: number[];
+  duplicate_ids?: Array<{ id: number; tool: string }>;
 }
 
 export interface FindingGroup {

@@ -53,6 +53,7 @@ class Finding(Base):
     cwe = Column(JSON, nullable=True)
     owasp = Column(JSON, nullable=True)
     references = Column(JSON, nullable=True)
+    tags = Column(JSON, nullable=True)
 
     is_false_positive = Column(Boolean, default=False)
     fp_note = Column(Text, nullable=True)

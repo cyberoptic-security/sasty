@@ -475,10 +475,14 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
     stdout_thread.start()
     stderr_thread.start()
 
-    # Wait for both threads with timeout
-    stdout_thread.join(timeout=300)
+    # Wait for both threads and process with timeout
+    stdout_thread.join(timeout=30)
     stderr_thread.join(timeout=5)
-    proc.wait(timeout=10)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        logger.warning(f"Scan {scan_id}: trufflehog process timeout, killed it")
 
     if scan_id is not None:
         try:
@@ -682,7 +686,8 @@ def _set_progress(scan: Scan, db: Session, steps: list[dict], current: str | Non
     # Deep-copy so SQLAlchemy detects the JSON mutation
     scan.progress = copy.deepcopy({"steps": steps, "current_tool": current})
     flag_modified(scan, "progress")
-    db.commit()
+    # Don't commit here - let the caller decide when to commit
+    # This prevents database lock contention from multiple commits
 
 
 def _build_extra_args(tool_name: str, opts: dict) -> list[str]:
@@ -873,7 +878,7 @@ def _detect_duplicates(scan_id: int, db: Session):
         if len(tools_in_group) > 1:
             for finding in group:
                 finding.is_duplicate = True
-                finding.duplicate_ids = [o.id for o in group if o.id != finding.id]
+                finding.duplicate_ids = [{"id": o.id, "tool": o.tool} for o in group if o.id != finding.id]
                 duplicate_count += 1
 
     if duplicate_count > 0:
@@ -908,6 +913,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
     # Initialise progress — all steps pending
     steps = [{"tool": t, "status": "pending", "findings": None, "error": None, "log_tail": []} for t in all_steps]
     _set_progress(scan, db, steps, all_steps[0] if all_steps else None)
+    db.commit()
 
     tool_options = tool_options or {}
     all_findings: list[dict] = []
@@ -929,6 +935,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                 if now - last_flush[0] >= 2:
                     last_flush[0] = now
                     _set_progress(scan, db, steps, tool_name)
+                    db.commit()
 
             cancel = lambda: _is_cancelled(scan_id)
 
@@ -968,13 +975,16 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                     _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
                     continue
 
-                logger.debug(f"Scan {scan_id}: enriching {len(findings)} findings with context")
+                logger.info(f"Scan {scan_id}: enriching {len(findings)} findings with context")
                 _enrich_with_context(findings, path)
-                logger.debug(f"Scan {scan_id}: extending all_findings")
+                logger.info(f"Scan {scan_id}: extending all_findings")
                 all_findings.extend(findings)
+                logger.info(f"Scan {scan_id}: marking step as done")
                 steps[i]["status"] = "done"
                 steps[i]["findings"] = len(findings)
+                logger.info(f"Scan {scan_id}: about to log completion")
                 logger.info(f"Scan {scan_id}: {tool_name} found {len(findings)} findings")
+                logger.info(f"Scan {scan_id}: logged completion, continuing")
             except ScanCancelled:
                 steps[i]["status"] = "error"
                 steps[i]["error"] = "Cancelled"
@@ -1000,6 +1010,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
             next_tool = all_steps[i + 1] if i + 1 < len(all_steps) else None
             logger.debug(f"Scan {scan_id}: setting progress for next tool")
             _set_progress(scan, db, steps, next_tool)
+            db.commit()  # Commit progress update
     except Exception as e:
         logger.error(f"Scan {scan_id}: unexpected error during scan: {e}", exc_info=True)
         scan.status = "failed"
