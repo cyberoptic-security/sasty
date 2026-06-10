@@ -414,14 +414,30 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
         raise RuntimeError("trufflehog not found — use the Tools panel to download it")
 
     is_git = (Path(path) / ".git").is_dir()
+
+    # Build base command with global flags first
+    cmd = [trufflehog_path]
+
+    # Add extra args that go before the subcommand (like --only-verified)
+    global_args = []
+    subcommand_args = []
+    if extra_args:
+        for arg in extra_args:
+            if arg.startswith("--only-verified") or arg.startswith("--include-detectors") or arg.startswith("--exclude-detectors"):
+                global_args.append(arg)
+            else:
+                subcommand_args.append(arg)
+
+    cmd.extend(global_args)
+
     if is_git:
         git_uri = Path(path).as_uri()
-        cmd = [trufflehog_path, "git", git_uri, "--json", "--no-update"]
+        cmd.extend(["git", git_uri])
     else:
-        cmd = [trufflehog_path, "filesystem", path, "--json", "--no-update"]
+        cmd.extend(["filesystem", path])
 
-    if extra_args:
-        cmd.extend(extra_args)
+    cmd.extend(["--json", "--no-update"])
+    cmd.extend(subcommand_args)
 
     if on_output:
         on_output("Scanning for credentials with live verification (trufflehog)...")
