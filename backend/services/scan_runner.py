@@ -442,6 +442,8 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
     if on_output:
         on_output("Scanning for credentials with live verification (trufflehog)...")
 
+    logger.debug(f"Trufflehog command: {' '.join(cmd)}")
+
     items: list[dict] = []
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -462,7 +464,11 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
         line = line.strip()
         if line and line.startswith("{"):
             try:
-                items.append(json.loads(line))
+                item = json.loads(line)
+                items.append(item)
+                # Log to see if verified field is present
+                if "verified" in item or "Verified" in item:
+                    logger.debug(f"Found verified field: {item.get('verified') or item.get('Verified')}")
             except json.JSONDecodeError:
                 pass
 

@@ -61,6 +61,7 @@ def parse(items: list) -> list[dict]:
                 "cwe": ["CWE-798"],
                 "owasp": ["A02:2021 - Cryptographic Failures"],
                 "references": ["https://github.com/trufflesecurity/trufflehog"],
+                "tags": ["verified" if verified else "unverified"],
             }
         )
     return findings
