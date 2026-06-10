@@ -937,8 +937,10 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
             extra_args = _build_extra_args(tool_name, opts)
 
             try:
+                logger.debug(f"Scan {scan_id}: starting tool execution for {tool_name}")
                 if cancel():
                     raise ScanCancelled()
+                logger.debug(f"Scan {scan_id}: cancel check passed")
                 if tool_name.startswith("custom:"):
                     cmd_def = custom_cmd_map[tool_name]
                     findings = _run_custom_command(
@@ -952,7 +954,9 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                 elif tool_name == "betterleaks":
                     findings = _run_betterleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "trufflehog":
+                    logger.debug(f"Scan {scan_id}: calling _run_trufflehog")
                     findings = _run_trufflehog(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    logger.debug(f"Scan {scan_id}: _run_trufflehog returned {len(findings)} findings")
                 elif tool_name == "hadolint":
                     findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "bandit":
@@ -964,7 +968,9 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                     _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
                     continue
 
+                logger.debug(f"Scan {scan_id}: enriching {len(findings)} findings with context")
                 _enrich_with_context(findings, path)
+                logger.debug(f"Scan {scan_id}: extending all_findings")
                 all_findings.extend(findings)
                 steps[i]["status"] = "done"
                 steps[i]["findings"] = len(findings)
@@ -992,6 +998,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                 logger.error(f"Scan {scan_id} tool error — {tool_name}: {msg}")
 
             next_tool = all_steps[i + 1] if i + 1 < len(all_steps) else None
+            logger.debug(f"Scan {scan_id}: setting progress for next tool")
             _set_progress(scan, db, steps, next_tool)
     except Exception as e:
         logger.error(f"Scan {scan_id}: unexpected error during scan: {e}", exc_info=True)
@@ -1003,6 +1010,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
         db.commit()
         return
 
+    logger.debug(f"Scan {scan_id}: exited tool loop, beginning completion sequence")
     # Carry forward triage states from previous scan via fingerprint matching
     if triage_map:
         for fd in all_findings:

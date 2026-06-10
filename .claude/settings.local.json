@@ -2,7 +2,20 @@
   "permissions": {
     "allow": [
       "Bash(npm run build)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(docker --version)",
+      "Bash(docker-compose --version)",
+      "Bash(docker-compose up *)",
+      "Bash(docker-compose logs *)",
+      "Bash(docker-compose down *)",
+      "Bash(docker stop *)",
+      "Bash(curl -X POST http://localhost:8000/api/scans -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(curl http://localhost:8000/api/scans)",
+      "Bash(curl http://localhost:8000/)",
+      "Bash(docker-compose ps *)",
+      "Bash(docker exec sasty-backend curl -X POST http://localhost:8000/api/scans -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(docker-compose exec -T backend curl -X POST http://localhost:8000/api/scans -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(docker-compose exec *)"
     ]
   }
 }
