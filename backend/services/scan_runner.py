@@ -18,6 +18,12 @@ from services.parsers import bandit_parser, betterleaks_parser, gitleaks_parser,
 logger = logging.getLogger(__name__)
 CONTEXT_LINES = 5
 
+# The secret scanners were capped at 120s (trufflehog at 30s), which is fine for
+# a source checkout but far too short for a container image rootfs — a 1.5 GB
+# image takes gitleaks over two minutes on its own, and the tool was being
+# killed mid-scan with its findings silently dropped.
+SECRET_SCAN_TIMEOUT = int(os.environ.get("SASTY_SECRET_SCAN_TIMEOUT", 1800))
+
 _db_path = os.environ.get("SASTY_DB_PATH", "./sasty.db")
 RAW_OUTPUT_DIR = Path(os.path.dirname(os.path.abspath(_db_path))) / "raw_output"
 
@@ -345,7 +351,7 @@ def _run_gitleaks(path: str, on_output: callable = None, cancel_check: callable 
             total_files = sum(file_counts.values())
             on_output(f"Scanning {total_files} files for secrets & credentials...")
 
-        _run_with_pty(cmd, on_output, cancel_check, timeout=120)
+        _run_with_pty(cmd, on_output, cancel_check, timeout=SECRET_SCAN_TIMEOUT)
 
         with open(report_path, "r") as f:
             raw = f.read().strip()
@@ -400,7 +406,7 @@ def _run_betterleaks(path: str, on_output: callable = None, cancel_check: callab
             total_files = sum(file_counts.values())
             on_output(f"Scanning {total_files} files for secrets & credentials (betterleaks)...")
 
-        _run_with_pty(cmd, on_output, cancel_check, timeout=120)
+        _run_with_pty(cmd, on_output, cancel_check, timeout=SECRET_SCAN_TIMEOUT)
 
         with open(report_path, "r") as f:
             raw = f.read().strip()
@@ -496,13 +502,15 @@ def _run_trufflehog(path: str, on_output: callable = None, cancel_check: callabl
     stderr_thread.start()
 
     # Wait for both threads and process with timeout
-    stdout_thread.join(timeout=30)
+    stdout_thread.join(timeout=SECRET_SCAN_TIMEOUT)
     stderr_thread.join(timeout=5)
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
         proc.kill()
         logger.warning(f"Scan {scan_id}: trufflehog process timeout, killed it")
+        if on_output:
+            on_output(f"trufflehog timed out after {SECRET_SCAN_TIMEOUT}s — results may be incomplete")
 
     if scan_id is not None:
         try:
@@ -1187,26 +1195,60 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
             if fp and fp in triage_map:
                 fd["triage_state"] = triage_map[fp]
 
-    logger.debug(f"Scan {scan_id}: adding {len(all_findings)} findings to database")
-    for fd in all_findings:
-        db.add(Finding(scan_id=scan_id, **fd))
-
     summary = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": len(all_findings)}
     for fd in all_findings:
         key = fd.get("severity", "INFO").lower()
         if key in summary:
             summary[key] += 1
 
-    scan.status = "completed"
-    scan.finished_at = datetime.utcnow()
-    scan.summary = summary
-    scan.progress = {"steps": steps, "current_tool": None}
-    if errors:
-        scan.error_log = "\n".join(errors)
+    # Everything below has to be guarded: an exception here used to escape into
+    # the executor's future, where nobody reads it, leaving the scan on
+    # "running" for ever with no clue as to why.
+    try:
+        logger.debug(f"Scan {scan_id}: adding {len(all_findings)} findings to database")
+        # bulk_insert_mappings skips per-row ORM object construction, which
+        # keeps the write transaction short on scans with thousands of findings.
+        db.bulk_insert_mappings(
+            Finding, [{"scan_id": scan_id, **fd} for fd in all_findings]
+        )
 
-    logger.debug(f"Scan {scan_id}: committing to database")
-    db.commit()
-    logger.debug(f"Scan {scan_id}: database commit complete")
+        scan.status = "completed"
+        scan.finished_at = datetime.utcnow()
+        scan.summary = summary
+        scan.progress = {"steps": steps, "current_tool": None}
+        if errors:
+            scan.error_log = "\n".join(errors)
 
-    _detect_duplicates(scan_id, db)
+        logger.debug(f"Scan {scan_id}: committing to database")
+        db.commit()
+        logger.debug(f"Scan {scan_id}: database commit complete")
+    except Exception as e:
+        logger.error(f"Scan {scan_id}: failed to save results: {e}", exc_info=True)
+        db.rollback()
+        try:
+            scan = db.query(Scan).filter(Scan.id == scan_id).first()
+            if scan:
+                scan.status = "failed"
+                scan.finished_at = datetime.utcnow()
+                scan.error_log = f"Scan ran but results could not be saved: {e}"
+                scan.progress = copy.deepcopy({"steps": steps, "current_tool": None})
+                flag_modified(scan, "progress")
+                db.commit()
+        except Exception as inner:
+            logger.error(f"Scan {scan_id}: could not even record the failure: {inner}")
+        return
+
+    # Persisted count is checked against what we meant to write — a silent
+    # shortfall means something rolled the transaction back underneath us.
+    saved = db.query(Finding).filter(Finding.scan_id == scan_id).count()
+    if saved != len(all_findings):
+        logger.error(
+            f"Scan {scan_id}: only {saved} of {len(all_findings)} findings persisted"
+        )
+
+    try:
+        _detect_duplicates(scan_id, db)
+    except Exception as e:
+        # Cosmetic step — never let it sink a completed scan
+        logger.warning(f"Scan {scan_id}: duplicate detection failed: {e}")
     logger.info(f"Scan {scan_id} complete — {summary['total']} findings")

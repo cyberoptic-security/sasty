@@ -1,5 +1,4 @@
 import logging
-import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,15 +7,16 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from sqlalchemy import text
-from sqlalchemy.exc import SAWarning
 from database import engine, Base
 from routers import tools, scans, findings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Suppress harmless SQLAlchemy identity map warnings
-warnings.filterwarnings("ignore", category=SAWarning, message=".*Identity map already had an identity.*")
+# NOTE: "Identity map already had an identity" was previously silenced here as
+# harmless. It was not — it was the symptom of scan and request threads sharing
+# one DBAPI connection (see database.py). Leave it visible so any recurrence of
+# that class of bug shows up instead of being swallowed.
 
 
 @asynccontextmanager
