@@ -101,7 +101,9 @@ export default function NewScanModal({ onClose }: Props) {
   const { data: info } = useQuery({
     queryKey: ["info"],
     queryFn: getInfo,
-    staleTime: Infinity,
+    // Not cached forever: installing crane from the Tools panel changes
+    // whether filesystem extraction is available.
+    staleTime: 30_000,
   });
   const isDocker = info?.is_docker ?? false;
   const canExtract = info?.image_extract_available ?? false;
@@ -427,7 +429,7 @@ export default function NewScanModal({ onClose }: Props) {
                 type="text"
                 value={image}
                 onChange={(e) => setImage(e.target.value)}
-                placeholder="objectide/objectide:latest"
+                placeholder="myorg/myapp:latest"
                 className="w-full bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
                 required={mode === "image"}
                 autoFocus

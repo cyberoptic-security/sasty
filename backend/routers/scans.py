@@ -40,7 +40,7 @@ class ScanCreate(BaseModel):
 
 
 class ImageScanCreate(BaseModel):
-    """Scan a container image by reference, e.g. objectide/objectide:latest."""
+    """Scan a container image by reference, e.g. myorg/myapp:latest."""
     image: str
     label: str | None = None
     tools: list[str] = ["trivy"]

@@ -194,13 +194,32 @@ def _run_with_pty(cmd: list[str], on_output: callable = None, cancel_check: call
             proc.wait()
         return proc.returncode, output_lines
     else:
-        # Windows: no pty support, poll with status messages
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Windows: no pty support. Capture output on a background thread — a
+        # tool that fails explains itself on stderr, and discarding that left
+        # errors reading as a bare exit code.
+        import threading
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, errors="replace",
+        )
+
+        def _drain():
+            for line in proc.stdout:
+                line = _ANSI_RE.sub("", line).strip()
+                if line:
+                    output_lines.append(line)
+                    if on_output:
+                        on_output(line)
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+
         elapsed = 0
         while proc.poll() is None:
             _time.sleep(1)
             elapsed += 1
-            if on_output and elapsed % 5 == 0:
+            if on_output and elapsed % 5 == 0 and not output_lines:
                 on_output(f"Scanning in progress... ({elapsed}s)")
             if cancel_check and cancel_check():
                 proc.kill()
@@ -208,6 +227,7 @@ def _run_with_pty(cmd: list[str], on_output: callable = None, cancel_check: call
             if elapsed > timeout:
                 proc.kill()
                 raise RuntimeError(f"Timed out after {timeout}s")
+        reader.join(timeout=5)
         return proc.returncode, output_lines
 
 
@@ -679,14 +699,13 @@ def _run_trivy_image(image_ref: str, on_output: callable = None, cancel_check: c
         if on_output:
             on_output(f"Pulling and scanning image {image_ref}...")
 
-        returncode, _ = _run_with_pty(cmd, on_output, cancel_check, timeout=1800)
+        returncode, out_lines = _run_with_pty(cmd, on_output, cancel_check, timeout=1800)
 
         if returncode != 0:
             if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
-                raise RuntimeError(
-                    f"trivy exited with code {returncode} — could not pull or scan {image_ref}. "
-                    "Check the reference is correct and the registry is reachable."
-                )
+                # Registry failures are only explained in trivy's own output —
+                # surface that rather than a bare exit code.
+                raise RuntimeError(image_scanner.explain_registry_failure(image_ref, out_lines))
 
         try:
             with open(output_path, "r", encoding="utf-8") as f:

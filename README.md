@@ -65,7 +65,7 @@ Use the **Tools** panel in the UI to check versions and update to the latest rel
 Pick **Image** in the New Scan dialog and enter a registry reference:
 
 ```
-objectide/objectide:latest
+myorg/myapp:latest
 ghcr.io/org/app:v2
 alpine@sha256:...
 ```

@@ -47,7 +47,7 @@ def normalize_image_ref(ref: str) -> str:
     if not _SAFE_REF.match(ref):
         raise ValueError(
             f"Invalid image reference: {ref!r} — expected something like "
-            "objectide/objectide:latest or ghcr.io/org/image@sha256:..."
+            "myorg/myapp:latest or ghcr.io/org/image@sha256:..."
         )
     if _DIGEST_RE.search(ref):
         return ref
@@ -91,10 +91,16 @@ def extraction_backend() -> Optional[str]:
     return None
 
 
-def _stream(cmd: list[str], on_output=None, cancel_check=None, timeout: int = 1800) -> int:
-    """Run a command, forwarding its output line by line to on_output."""
+def _stream(cmd: list[str], on_output=None, cancel_check=None, timeout: int = 1800) -> tuple[int, list[str]]:
+    """Run a command, forwarding its output line by line to on_output.
+
+    Returns (returncode, output_lines) — the lines matter because registry
+    errors ("UNAUTHORIZED", "MANIFEST_UNKNOWN") only ever appear there, and a
+    bare exit code tells the user nothing about what went wrong.
+    """
     import time as _time
 
+    lines: list[str] = []
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
@@ -102,8 +108,10 @@ def _stream(cmd: list[str], on_output=None, cancel_check=None, timeout: int = 18
     try:
         for line in proc.stdout:
             line = line.strip()
-            if line and on_output:
-                on_output(line)
+            if line:
+                lines.append(line)
+                if on_output:
+                    on_output(line)
             if cancel_check and cancel_check():
                 proc.kill()
                 raise _cancelled()
@@ -112,7 +120,30 @@ def _stream(cmd: list[str], on_output=None, cancel_check=None, timeout: int = 18
                 raise ImagePullError(f"Timed out after {timeout}s: {' '.join(cmd[:2])}")
     finally:
         proc.wait()
-    return proc.returncode
+    return proc.returncode, lines
+
+
+def explain_registry_failure(image_ref: str, lines: list[str]) -> str:
+    """Turn raw registry output into something a user can act on."""
+    blob = " ".join(lines).lower()
+    if "unauthorized" in blob or "authentication required" in blob:
+        # Docker Hub returns UNAUTHORIZED for private *and* non-existent repos,
+        # so a typo'd name lands here far more often than a real auth problem.
+        return (
+            f"{image_ref} could not be pulled — the registry says it is private or "
+            "does not exist. Check the spelling of the repository and tag; if the "
+            "image really is private, Sasty has no credentials for it."
+        )
+    if "manifest_unknown" in blob or "manifest unknown" in blob or "not found" in blob:
+        return f"{image_ref} was not found in the registry — check the repository name and tag."
+    if "no such host" in blob or "dial tcp" in blob or "timeout" in blob or "connection refused" in blob:
+        return f"Could not reach the registry for {image_ref} — check network access and any proxy settings."
+    detail = _tail(lines)
+    return f"Could not pull {image_ref}:\n{detail}"
+
+
+def _tail(lines: list[str], n: int = 5) -> str:
+    return "\n".join(lines[-n:]) if lines else "(no output)"
 
 
 def _cancelled():
@@ -169,13 +200,10 @@ def _export_with_crane(image_ref: str, tar_path: Path, on_output=None, cancel_ch
         on_output(f"Pulling {image_ref} from the registry (crane)...")
     # crane defaults to the linux/amd64 variant of a multi-arch image, which is
     # also what trivy scans — keep the two consistent.
-    rc = _stream([crane, "export", "--platform", "linux/amd64", image_ref, str(tar_path)],
-                 on_output, cancel_check, timeout=1800)
+    rc, lines = _stream([crane, "export", "--platform", "linux/amd64", image_ref, str(tar_path)],
+                        on_output, cancel_check, timeout=1800)
     if rc != 0 or not tar_path.exists():
-        raise ImagePullError(
-            f"crane could not export {image_ref} (exit {rc}) — check the reference "
-            "is correct and the registry is reachable"
-        )
+        raise ImagePullError(explain_registry_failure(image_ref, lines))
 
 
 def _export_with_docker(image_ref: str, tar_path: Path, on_output=None, cancel_check=None) -> None:
@@ -185,9 +213,9 @@ def _export_with_docker(image_ref: str, tar_path: Path, on_output=None, cancel_c
 
     if on_output:
         on_output(f"Pulling {image_ref} (docker)...")
-    rc = _stream([docker, "pull", image_ref], on_output, cancel_check, timeout=1800)
+    rc, lines = _stream([docker, "pull", image_ref], on_output, cancel_check, timeout=1800)
     if rc != 0:
-        raise ImagePullError(f"docker pull failed for {image_ref} (exit {rc})")
+        raise ImagePullError(explain_registry_failure(image_ref, lines))
 
     created = subprocess.run(
         [docker, "create", image_ref], capture_output=True, text=True, timeout=120,
@@ -199,10 +227,10 @@ def _export_with_docker(image_ref: str, tar_path: Path, on_output=None, cancel_c
     try:
         if on_output:
             on_output("Exporting image filesystem...")
-        rc = _stream([docker, "export", "-o", str(tar_path), container_id],
-                     on_output, cancel_check, timeout=1800)
+        rc, lines = _stream([docker, "export", "-o", str(tar_path), container_id],
+                            on_output, cancel_check, timeout=1800)
         if rc != 0:
-            raise ImagePullError(f"docker export failed (exit {rc})")
+            raise ImagePullError(f"docker export failed (exit {rc}):\n{_tail(lines)}")
     finally:
         subprocess.run([docker, "rm", "-f", container_id], capture_output=True, timeout=60)
 

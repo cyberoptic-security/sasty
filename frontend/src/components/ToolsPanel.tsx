@@ -11,7 +11,12 @@ export default function ToolsPanel() {
 
   const mutation = useMutation({
     mutationFn: (name: string) => updateTool(name),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tools"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tools"] });
+      // Installing crane (or docker becoming reachable) changes what the New
+      // Scan dialog can offer, so drop the cached environment info too.
+      queryClient.invalidateQueries({ queryKey: ["info"] });
+    },
   });
 
   if (isLoading) {
