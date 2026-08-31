@@ -20,6 +20,7 @@ async def update_tool(name: str):
         "hadolint": tool_manager.update_hadolint,
         "bandit": tool_manager.update_bandit,
         "trivy": tool_manager.update_trivy,
+        "crane": tool_manager.update_crane,
     }
     if name not in updaters:
         raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")

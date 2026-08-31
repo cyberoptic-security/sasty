@@ -53,14 +53,46 @@ Frontend at `http://localhost:3000`, backend at `http://localhost:8000`.
 | Semgrep | Multi-language static analysis | Included via pip |
 | Gitleaks | Secret/credential detection | Auto-downloaded from GitHub releases |
 | Hadolint | Dockerfile linting | Auto-downloaded from GitHub releases |
+| Trivy | Container image & dependency vulnerabilities | Auto-downloaded from GitHub releases |
+| crane | Unpacks container images without a Docker daemon | Auto-downloaded from GitHub releases |
 
 Use the **Tools** panel in the UI to check versions and update to the latest releases.
+
+---
+
+## Scanning a container image
+
+Pick **Image** in the New Scan dialog and enter a registry reference:
+
+```
+objectide/objectide:latest
+ghcr.io/org/app:v2
+alpine@sha256:...
+```
+
+Trivy pulls the image itself, so this works with no Docker daemon on the machine.
+It reports vulnerable OS and language packages, secrets baked into the layers, and
+misconfigurations. Omitting the tag scans `:latest`.
+
+Tick **Extract image filesystem** to unpack the image so the other scanners
+(secret scanners, Semgrep, Bandit) can run over its contents as well. This uses
+[crane](https://github.com/google/go-containerregistry) — a ~12 MB static binary
+that Sasty downloads from the **Tools** panel — which pulls and flattens the
+image straight from the registry, so no Docker daemon is needed here either. If
+crane is not installed, Sasty falls back to a local `docker pull` / `docker
+export`; the checkbox is disabled only when neither is available.
+
+The unpacked filesystem is deleted once the scan finishes; findings keep their
+in-image paths (e.g. `/usr/src/app/index.js`).
+
+Image scans can be re-run from the scan detail page like any other scan.
 
 ---
 
 ## Features
 
 - Scan any local folder with Semgrep, Gitleaks, and Hadolint
+- Scan a container image by Docker Hub / registry reference
 - Findings grouped by rule with individual occurrence detail
 - Code context viewer with syntax highlighting (±5 lines around each finding)
 - Severity filtering (CRITICAL / HIGH / MEDIUM / LOW / INFO)

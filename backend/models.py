@@ -10,6 +10,8 @@ class Scan(Base):
     id = Column(Integer, primary_key=True, index=True)
     path = Column(String, nullable=False)
     label = Column(String, nullable=True)
+    source_type = Column(String, default="path")  # path, upload, import, image
+    image_ref = Column(String, nullable=True)  # container image reference, when source_type == "image"
     status = Column(String, default="pending")  # pending, running, completed, failed
     started_at = Column(DateTime, default=datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)

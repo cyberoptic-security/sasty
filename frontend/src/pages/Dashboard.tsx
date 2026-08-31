@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import {
+  Box,
   CheckCircle,
   ChevronDown,
   ChevronRight,
@@ -139,6 +140,11 @@ export default function Dashboard() {
                 <span className="font-mono text-xs text-zinc-700 dark:text-zinc-200 truncate max-w-xs" title={scan.path}>
                   {scan.label ?? scan.path.split(/[/\\]/).pop()}
                 </span>
+                {scan.source_type === "image" && (
+                  <span className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300 shrink-0">
+                    <Box size={10} /> image
+                  </span>
+                )}
                 {!isVersion && versionCount && versionCount > 1 && (
                   <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 shrink-0">
                     v{scan.version ?? 1}

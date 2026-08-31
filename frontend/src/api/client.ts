@@ -16,7 +16,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 // --- Info ---
-export const getInfo = () => request<{ is_docker: boolean }>("/info");
+export const getInfo = () =>
+  request<{
+    is_docker: boolean;
+    image_extract_available: boolean;
+    image_extract_backend: "crane" | "docker" | null;
+  }>("/info");
 
 // --- Tools ---
 export const getTools = () => request<Tool[]>("/tools");
@@ -48,6 +53,25 @@ export const createScan = (body: {
   custom_commands?: { label: string; command: string }[];
 }) =>
   request<Scan>("/scans", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const checkImage = (image: string) =>
+  request<{ image: string; extract_available: boolean; extract_backend: string | null }>(
+    `/scans/check-image?image=${encodeURIComponent(image)}`
+  );
+
+export const createImageScan = (body: {
+  image: string;
+  label?: string;
+  tools: string[];
+  semgrep_configs: string[];
+  tool_options?: Record<string, Record<string, string | boolean | number>>;
+  custom_commands?: { label: string; command: string }[];
+  extract_filesystem?: boolean;
+}) =>
+  request<Scan>("/scans/image", {
     method: "POST",
     body: JSON.stringify(body),
   });

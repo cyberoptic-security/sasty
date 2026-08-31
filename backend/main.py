@@ -34,6 +34,8 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE scans ADD COLUMN version INTEGER DEFAULT 1",
             "ALTER TABLE findings ADD COLUMN is_duplicate INTEGER DEFAULT 0",
             "ALTER TABLE findings ADD COLUMN duplicate_ids JSON",
+            "ALTER TABLE scans ADD COLUMN source_type TEXT DEFAULT 'path'",
+            "ALTER TABLE scans ADD COLUMN image_ref TEXT",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -62,8 +64,17 @@ import os
 @app.get("/api/info")
 def get_info():
     """Return environment info for the frontend."""
+    from services import image_scanner
     is_docker = os.path.exists("/.dockerenv") or os.environ.get("SASTY_DOCKER") == "1"
-    return {"is_docker": is_docker}
+    # Image filesystem extraction prefers crane (a bundled static registry
+    # client) and falls back to a local docker daemon. Image scanning itself
+    # only needs trivy.
+    backend = image_scanner.extraction_backend()
+    return {
+        "is_docker": is_docker,
+        "image_extract_available": backend is not None,
+        "image_extract_backend": backend,
+    }
 
 # Serve the built frontend from /app/frontend/dist if it exists
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"

@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
-import { ChevronDown, ChevronRight, FileJson, GitBranch, Plus, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Box, ChevronDown, ChevronRight, FileJson, GitBranch, Plus, Terminal, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { checkGit, createScan, getInfo, importScan, uploadScan } from "../api/client";
+import { checkGit, createImageScan, createScan, getInfo, importScan, uploadScan } from "../api/client";
 
 const TOOLS = ["semgrep", "betterleaks", "trufflehog", "hadolint", "bandit", "trivy"] as const;
 
@@ -79,7 +79,11 @@ const TOOL_OPTIONS: Record<string, ToolOptionDef[]> = {
   ],
 };
 
-type Mode = "path" | "upload" | "import";
+type Mode = "path" | "upload" | "import" | "image";
+
+// Only trivy reads a container image directly. Everything else needs the
+// image filesystem exported first.
+const IMAGE_NATIVE_TOOLS = ["trivy"];
 
 interface CustomCmd {
   label: string;
@@ -100,9 +104,13 @@ export default function NewScanModal({ onClose }: Props) {
     staleTime: Infinity,
   });
   const isDocker = info?.is_docker ?? false;
+  const canExtract = info?.image_extract_available ?? false;
+  const extractBackend = info?.image_extract_backend ?? null;
 
   const [mode, setMode] = useState<Mode>(isDocker ? "upload" : "path");
   const [path, setPath] = useState("");
+  const [image, setImage] = useState("");
+  const [extractFs, setExtractFs] = useState(false);
   const [label, setLabel] = useState("");
   const [selectedTools, setSelectedTools] = useState<string[]>([...TOOLS]);
   const [selectedConfigs, setSelectedConfigs] = useState<string[]>(["auto"]);
@@ -165,6 +173,15 @@ export default function NewScanModal({ onClose }: Props) {
     },
   });
 
+  const imageMutation = useMutation({
+    mutationFn: createImageScan,
+    onSuccess: (scan) => {
+      queryClient.invalidateQueries({ queryKey: ["scans"] });
+      onClose();
+      navigate(`/scans/${scan.id}`);
+    },
+  });
+
   const uploadMutation = useMutation({
     mutationFn: (f: File) => {
       setUploadProgress(0);
@@ -194,7 +211,27 @@ export default function NewScanModal({ onClose }: Props) {
     },
   });
 
-  const mutation = mode === "path" ? pathMutation : mode === "upload" ? uploadMutation : importMutation;
+  const mutation =
+    mode === "path"
+      ? pathMutation
+      : mode === "image"
+      ? imageMutation
+      : mode === "upload"
+      ? uploadMutation
+      : importMutation;
+
+  // Without filesystem extraction only trivy can read an image, so drop the
+  // tools that would just be skipped server-side.
+  useEffect(() => {
+    if (mode === "image" && !extractFs) {
+      setSelectedTools((prev) => prev.filter((t) => IMAGE_NATIVE_TOOLS.includes(t)));
+    }
+  }, [mode, extractFs]);
+
+  function toggleExtractFs(on: boolean) {
+    setExtractFs(on);
+    setSelectedTools(on ? [...TOOLS] : [...IMAGE_NATIVE_TOOLS]);
+  }
 
   function toggleTool(tool: string) {
     setSelectedTools((prev) =>
@@ -235,6 +272,20 @@ export default function NewScanModal({ onClose }: Props) {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (mode === "image") {
+      if (!image.trim()) return;
+      const cmds = customCommands.filter((c) => c.label.trim() && c.command.trim());
+      imageMutation.mutate({
+        image: image.trim(),
+        label: label.trim() || undefined,
+        tools: selectedTools,
+        semgrep_configs: selectedConfigs,
+        tool_options: buildToolOptions(),
+        custom_commands: cmds.length > 0 ? cmds : undefined,
+        extract_filesystem: extractFs,
+      });
+      return;
+    }
     if (mode === "path") {
       if (!path.trim()) return;
       const cmds = customCommands.filter((c) => c.label.trim() && c.command.trim());
@@ -284,7 +335,13 @@ export default function NewScanModal({ onClose }: Props) {
   }
 
   const canSubmit =
-    mode === "path" ? !!path.trim() : mode === "upload" ? !!file : !!importFile;
+    mode === "path"
+      ? !!path.trim()
+      : mode === "image"
+      ? !!image.trim()
+      : mode === "upload"
+      ? !!file
+      : !!importFile;
 
   // Check if any tool options have been set (for indicator)
   const hasOptionsSet = Object.values(toolOptions).some((opts) =>
@@ -320,6 +377,23 @@ export default function NewScanModal({ onClose }: Props) {
             )}
             <button
               type="button"
+              onClick={() => {
+                setMode("image");
+                setExtractFs(false);
+                setSelectedTools([...IMAGE_NATIVE_TOOLS]);
+              }}
+              className={clsx(
+                "flex-1 text-sm py-1.5 rounded-md transition-colors font-medium flex items-center justify-center gap-1.5",
+                mode === "image"
+                  ? "bg-white dark:bg-zinc-700 text-zinc-800 dark:text-zinc-200 shadow-sm"
+                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+              )}
+            >
+              <Box size={13} />
+              Image
+            </button>
+            <button
+              type="button"
               onClick={() => setMode("upload")}
               className={clsx(
                 "flex-1 text-sm py-1.5 rounded-md transition-colors font-medium flex items-center justify-center gap-1.5",
@@ -346,7 +420,48 @@ export default function NewScanModal({ onClose }: Props) {
             </button>
           </div>
 
-          {mode === "path" ? (
+          {mode === "image" ? (
+            <div>
+              <label className="block text-sm text-zinc-600 dark:text-zinc-400 mb-1.5">Image Reference *</label>
+              <input
+                type="text"
+                value={image}
+                onChange={(e) => setImage(e.target.value)}
+                placeholder="objectide/objectide:latest"
+                className="w-full bg-white border border-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
+                required={mode === "image"}
+                autoFocus
+              />
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-1">
+                Docker Hub or any registry — <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">nginx:1.25</code>,{" "}
+                <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">ghcr.io/org/app:v2</code> or a{" "}
+                <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">@sha256:</code> digest. Trivy pulls it for you; no tag means <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">:latest</code>.
+              </p>
+
+              <label
+                className={clsx(
+                  "flex items-start gap-2 mt-3 select-none",
+                  canExtract ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={extractFs}
+                  disabled={!canExtract}
+                  onChange={(e) => toggleExtractFs(e.target.checked)}
+                  className="accent-emerald-500 mt-0.5"
+                />
+                <span>
+                  <span className="text-sm">Extract image filesystem</span>
+                  <span className="block text-[11px] text-zinc-400 dark:text-zinc-600">
+                    {canExtract
+                      ? `Unpacks the image so the secret scanners and SAST tools can run over its contents (via ${extractBackend}). Slower, and needs disk space.`
+                      : "Unavailable — install crane from the Tools panel, or make a Docker daemon reachable. Trivy still scans the image on its own."}
+                  </span>
+                </span>
+              </label>
+            </div>
+          ) : mode === "path" ? (
             <div>
               <label className="block text-sm text-zinc-600 dark:text-zinc-400 mb-1.5">Target Path *</label>
               <input
@@ -483,21 +598,38 @@ export default function NewScanModal({ onClose }: Props) {
                   )}
                 </div>
                 <div className="flex gap-3 flex-wrap">
-                  {TOOLS.map((tool) => (
-                    <label
-                      key={tool}
-                      className="flex items-center gap-2 select-none cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedTools.includes(tool)}
-                        onChange={() => toggleTool(tool)}
-                        className="accent-emerald-500"
-                      />
-                      <span className="text-sm font-mono">{tool}</span>
-                    </label>
-                  ))}
+                  {TOOLS.map((tool) => {
+                    // In image mode the file-based tools only have something to
+                    // read once the filesystem has been extracted.
+                    const needsFs = mode === "image" && !IMAGE_NATIVE_TOOLS.includes(tool);
+                    const disabled = needsFs && !extractFs;
+                    return (
+                      <label
+                        key={tool}
+                        title={disabled ? "Needs image filesystem extraction" : undefined}
+                        className={clsx(
+                          "flex items-center gap-2 select-none",
+                          disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer"
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedTools.includes(tool)}
+                          disabled={disabled}
+                          onChange={() => toggleTool(tool)}
+                          className="accent-emerald-500"
+                        />
+                        <span className="text-sm font-mono">{tool}</span>
+                      </label>
+                    );
+                  })}
                 </div>
+                {mode === "image" && (
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-1.5">
+                    Trivy scans the image directly for vulnerable packages, baked-in secrets and
+                    misconfigurations. The other scanners need the filesystem extracted first.
+                  </p>
+                )}
               </div>
 
               {selectedTools.includes("semgrep") && (
@@ -609,7 +741,7 @@ export default function NewScanModal({ onClose }: Props) {
               </div>
 
               {/* Custom Commands (collapsible) */}
-              {mode === "path" && (
+              {(mode === "path" || mode === "image") && (
                 <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg">
                   <button
                     type="button"
@@ -632,7 +764,7 @@ export default function NewScanModal({ onClose }: Props) {
                   {showCustom && (
                     <div className="px-4 pb-4 border-t border-zinc-100 dark:border-zinc-800 pt-3 space-y-3">
                       <p className="text-xs text-zinc-400 dark:text-zinc-600">
-                        Run custom scanner commands. Use <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{path}"}</code> for the scan target and <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{output}"}</code> for the JSON output file. Output is auto-detected (semgrep/gitleaks/hadolint/bandit/trivy format).
+                        Run custom scanner commands. Use <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{path}"}</code> for the scan target{mode === "image" && <>, <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{image}"}</code> for the image reference</>} and <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"{output}"}</code> for the JSON output file. Output is auto-detected (semgrep/gitleaks/hadolint/bandit/trivy format).
                       </p>
 
                       {customCommands.map((cmd, idx) => (

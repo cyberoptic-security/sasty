@@ -384,6 +384,58 @@ async def update_trivy() -> str:
     return version
 
 
+def get_crane_version() -> Optional[str]:
+    path = get_tool_path("crane")
+    if not path:
+        return None
+    version = _get_version([path, "version"])
+    if not version and path:
+        return "installed"
+    return version
+
+
+async def update_crane() -> str:
+    """Download the latest crane binary from the go-containerregistry releases.
+
+    crane is a registry client, not a scanner — it is what lets Sasty unpack a
+    container image without a Docker daemon.
+    """
+    system, arch = get_platform()
+    release = await _get_latest_release("google", "go-containerregistry")
+    version = release["tag_name"].lstrip("v")
+
+    os_key = {"windows": "Windows", "darwin": "Darwin", "linux": "Linux"}[system]
+    arch_key = "arm64" if arch == "arm64" else "x86_64"
+    asset_name = f"go-containerregistry_{os_key}_{arch_key}.tar.gz"
+    binary_name = "crane.exe" if system == "windows" else "crane"
+
+    asset = next((a for a in release["assets"] if a["name"] == asset_name), None)
+    if not asset:
+        names = [a["name"] for a in release["assets"]]
+        raise RuntimeError(f"No crane asset found for {system}/{arch}. Available: {names}")
+
+    data = await _download_bytes(asset["browser_download_url"])
+    dest = TOOLS_DIR / binary_name
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        archive = tmp_path / asset["name"]
+        archive.write_bytes(data)
+        # The tarball also carries gcrane/krane, which we do not need
+        with tarfile.open(archive) as tf:
+            members = [m for m in tf.getmembers()
+                       if m.isfile() and Path(m.name).name in ("crane", "crane.exe")]
+            if not members:
+                raise RuntimeError("No crane binary found in the release archive")
+            tf.extract(members[0], tmp_path)
+            shutil.move(str(tmp_path / members[0].name), str(dest))
+
+    if system != "windows":
+        _make_executable(dest)
+
+    return version
+
+
 async def get_all_tool_status() -> list[dict]:
     semgrep_ver = get_semgrep_version()
     betterleaks_ver = get_betterleaks_version()
@@ -391,6 +443,7 @@ async def get_all_tool_status() -> list[dict]:
     hadolint_ver = get_hadolint_version()
     bandit_ver = get_bandit_version()
     trivy_ver = get_trivy_version()
+    crane_ver = get_crane_version()
 
     return [
         {
@@ -428,5 +481,11 @@ async def get_all_tool_status() -> list[dict]:
             "description": "Dependency vulnerability & IaC misconfiguration scanner",
             "current_version": trivy_ver,
             "installed": trivy_ver is not None,
+        },
+        {
+            "name": "crane",
+            "description": "Unpacks container images for scanning — no Docker daemon needed",
+            "current_version": crane_ver,
+            "installed": crane_ver is not None,
         },
     ]

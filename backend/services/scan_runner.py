@@ -12,7 +12,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from models import Finding, Scan
-from services import tool_manager
+from services import image_scanner, tool_manager
 from services.parsers import bandit_parser, betterleaks_parser, gitleaks_parser, hadolint_parser, semgrep_parser, trivy_parser, trufflehog_parser
 
 logger = logging.getLogger(__name__)
@@ -649,7 +649,82 @@ def _run_trivy(path: str, on_output: callable = None, cancel_check: callable = N
             pass
 
 
+def _run_trivy_image(image_ref: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, extra_args: list[str] | None = None) -> list[dict]:
+    """Scan a container image reference with Trivy.
+
+    Trivy resolves the reference itself — local daemon first, then the remote
+    registry — so this works with or without Docker installed.
+    """
+    trivy_path = tool_manager.get_tool_path("trivy")
+    if not trivy_path:
+        raise RuntimeError("trivy not found — use the Tools panel to download it")
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        output_path = f.name
+
+    try:
+        cmd = [
+            trivy_path, "image",
+            "--format", "json",
+            "--output", output_path,
+        ]
+        # Images get the secret scanner too — layers routinely carry baked-in
+        # credentials that a filesystem scan of the source would never see.
+        if not (extra_args and "--scanners" in extra_args):
+            cmd += ["--scanners", "vuln,secret,misconfig"]
+        if extra_args:
+            cmd.extend(extra_args)
+        cmd.append(image_ref)
+
+        if on_output:
+            on_output(f"Pulling and scanning image {image_ref}...")
+
+        returncode, _ = _run_with_pty(cmd, on_output, cancel_check, timeout=1800)
+
+        if returncode != 0:
+            if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
+                raise RuntimeError(
+                    f"trivy exited with code {returncode} — could not pull or scan {image_ref}. "
+                    "Check the reference is correct and the registry is reachable."
+                )
+
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        except FileNotFoundError:
+            return []
+
+        if not raw:
+            return []
+
+        if scan_id is not None:
+            try:
+                raw_dir = get_raw_output_dir(scan_id)
+                (raw_dir / "trivy.json").write_text(raw, encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Could not save raw trivy output: {e}")
+
+        data = json.loads(raw)
+        if on_output:
+            meta = data.get("Metadata") or {}
+            os_info = meta.get("OS") or {}
+            if os_info:
+                on_output(f"Image OS: {os_info.get('Family', '?')} {os_info.get('Name', '')}".strip())
+        return trivy_parser.parse(data)
+    except ScanCancelled:
+        raise
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Could not parse trivy output: {e}")
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
 def _enrich_with_context(findings: list[dict], base_path: str):
+    if not base_path:
+        return
     for finding in findings:
         fp = finding.get("file_path", "")
         if not fp:
@@ -662,6 +737,21 @@ def _enrich_with_context(findings: list[dict], base_path: str):
         if ls:
             finding["code_context"] = get_code_context(fp, ls, le)
             finding["file_path"] = fp
+
+
+def _relativise_to_rootfs(findings: list[dict], rootfs_dir: str):
+    """Rewrite host paths inside an exported image rootfs to image paths.
+
+    The rootfs is a temp dir that gets deleted once the scan finishes, so a
+    finding in `/tmp/sasty_rootfs_7_x/usr/src/app/index.js` is stored as
+    `/usr/src/app/index.js` — where it actually lives in the image.
+    """
+    root = os.path.abspath(rootfs_dir)
+    for finding in findings:
+        fp = finding.get("file_path", "")
+        if fp and os.path.isabs(fp) and os.path.abspath(fp).startswith(root):
+            rel = os.path.relpath(os.path.abspath(fp), root)
+            finding["file_path"] = "/" + rel.replace(os.sep, "/")
 
 
 TOOL_RUNNERS = {
@@ -767,13 +857,14 @@ def _build_extra_args(tool_name: str, opts: dict) -> list[str]:
     return args
 
 
-def _run_custom_command(path: str, command: str, tool_label: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None) -> list[dict]:
+def _run_custom_command(path: str, command: str, tool_label: str, on_output: callable = None, cancel_check: callable = None, scan_id: int | None = None, image_ref: str | None = None) -> list[dict]:
     """Run a user-defined custom command and capture JSON output."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         output_path = f.name
 
     # Replace placeholders in the command
     cmd_str = command.replace("{path}", path).replace("{output}", output_path)
+    cmd_str = cmd_str.replace("{image}", image_ref or "")
 
     try:
         if on_output:
@@ -892,7 +983,14 @@ def _detect_duplicates(scan_id: int, db: Session):
         logger.info(f"Scan {scan_id}: {duplicate_count} findings flagged as cross-tool duplicates")
 
 
-def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], db: Session, triage_map: dict[str, str] | None = None, tool_options: dict[str, dict] | None = None, custom_commands: list[dict] | None = None):
+# Tools that need a real filesystem to look at. In image mode they only run
+# once the image rootfs has been exported.
+_FS_ONLY_TOOLS = {"semgrep", "gitleaks", "betterleaks", "trufflehog", "hadolint", "bandit"}
+
+IMAGE_EXPORT_STEP = "image-export"
+
+
+def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], db: Session, triage_map: dict[str, str] | None = None, tool_options: dict[str, dict] | None = None, custom_commands: list[dict] | None = None, image_ref: str | None = None, extract_filesystem: bool = False):
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
         scan.status = "running"
@@ -900,8 +998,16 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
         logger.error(f"Scan {scan_id}: failed to query/update scan status: {e}")
         raise
 
+    # In image mode `path` is the image reference, not somewhere on disk. The
+    # exported rootfs (if any) lands in fs_path and is what the file-based
+    # tools actually scan.
+    fs_path: str | None = None if image_ref else path
+    rootfs_dir: str | None = None
+
     # Build the full tool list including custom commands
     all_steps = list(tools)
+    if image_ref and extract_filesystem:
+        all_steps.insert(0, IMAGE_EXPORT_STEP)
     custom_cmd_map: dict[str, dict] = {}
     if custom_commands:
         for idx, cmd_def in enumerate(custom_commands):
@@ -948,35 +1054,65 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                 if cancel():
                     raise ScanCancelled()
                 logger.debug(f"Scan {scan_id}: cancel check passed")
+                if tool_name == IMAGE_EXPORT_STEP:
+                    rootfs_dir = tempfile.mkdtemp(prefix=f"sasty_rootfs_{scan_id}_")
+                    image_scanner.export_rootfs(image_ref, Path(rootfs_dir), on_output=_on_output, cancel_check=cancel)
+                    fs_path = rootfs_dir
+                    steps[i]["status"] = "done"
+                    _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
+                    db.commit()
+                    continue
+
+                if image_ref and tool_name in _FS_ONLY_TOOLS and not fs_path:
+                    steps[i]["status"] = "skipped"
+                    steps[i]["error"] = "Needs the image filesystem — enable filesystem extraction"
+                    _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
+                    db.commit()
+                    continue
+
+                # File-based tools scan the exported rootfs; trivy scans the
+                # image reference itself.
+                target = fs_path or path
+
                 if tool_name.startswith("custom:"):
                     cmd_def = custom_cmd_map[tool_name]
                     findings = _run_custom_command(
-                        path, cmd_def["command"], cmd_def.get("label", "custom"),
+                        target, cmd_def["command"], cmd_def.get("label", "custom"),
                         on_output=_on_output, cancel_check=cancel, scan_id=scan_id,
+                        image_ref=image_ref,
                     )
                 elif tool_name == "semgrep":
-                    findings = _run_semgrep(path, semgrep_configs, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    findings = _run_semgrep(target, semgrep_configs, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "gitleaks":
-                    findings = _run_gitleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    findings = _run_gitleaks(target, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "betterleaks":
-                    findings = _run_betterleaks(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    findings = _run_betterleaks(target, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "trufflehog":
                     logger.debug(f"Scan {scan_id}: calling _run_trufflehog")
-                    findings = _run_trufflehog(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    findings = _run_trufflehog(target, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                     logger.debug(f"Scan {scan_id}: _run_trufflehog returned {len(findings)} findings")
                 elif tool_name == "hadolint":
-                    findings = _run_hadolint(path, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
+                    findings = _run_hadolint(target, on_output=_on_output, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "bandit":
-                    findings = _run_bandit(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    findings = _run_bandit(target, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                 elif tool_name == "trivy":
-                    findings = _run_trivy(path, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    if image_ref:
+                        findings = _run_trivy_image(image_ref, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
+                    else:
+                        findings = _run_trivy(target, on_output=_on_output, cancel_check=cancel, scan_id=scan_id, extra_args=extra_args)
                 else:
                     steps[i]["status"] = "skipped"
                     _set_progress(scan, db, steps, all_steps[i + 1] if i + 1 < len(all_steps) else None)
                     continue
 
                 logger.info(f"Scan {scan_id}: enriching {len(findings)} findings with context")
-                _enrich_with_context(findings, path)
+                # Trivy's image findings reference paths inside the image, not
+                # on this host — enriching them against the rootfs would point
+                # at a temp dir we are about to delete.
+                if not (image_ref and tool_name == "trivy"):
+                    _enrich_with_context(findings, fs_path)
+                if rootfs_dir:
+                    _relativise_to_rootfs(findings, rootfs_dir)
                 logger.info(f"Scan {scan_id}: extending all_findings")
                 all_findings.extend(findings)
                 logger.info(f"Scan {scan_id}: marking step as done")
@@ -998,6 +1134,7 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
                 scan.progress = copy.deepcopy({"steps": steps, "current_tool": None})
                 flag_modified(scan, "progress")
                 db.commit()
+                image_scanner.cleanup_rootfs(rootfs_dir)
                 logger.info(f"Scan {scan_id} cancelled by user")
                 return
             except Exception as e:
@@ -1019,8 +1156,10 @@ def run_scan(scan_id: int, path: str, tools: list[str], semgrep_configs: list[st
         scan.progress = copy.deepcopy({"steps": steps, "current_tool": None})
         flag_modified(scan, "progress")
         db.commit()
+        image_scanner.cleanup_rootfs(rootfs_dir)
         return
 
+    image_scanner.cleanup_rootfs(rootfs_dir)
     logger.debug(f"Scan {scan_id}: exited tool loop, beginning completion sequence")
     # Carry forward triage states from previous scan via fingerprint matching
     if triage_map:

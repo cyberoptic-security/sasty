@@ -95,4 +95,37 @@ def parse(data: dict) -> list[dict]:
                 }
             )
 
+        # Secret findings (baked-in credentials — mostly from image scans)
+        for secret in result.get("Secrets") or []:
+            rule = secret.get("RuleID", "secret-unknown")
+            raw_sev = secret.get("Severity", "UNKNOWN").upper()
+            severity = SEVERITY_MAP.get(raw_sev, "INFO")
+
+            title = secret.get("Title", "")
+            category_name = secret.get("Category", "")
+            message = title or rule
+            if category_name:
+                message = f"{category_name}: {message}"
+
+            findings.append(
+                {
+                    "tool": "trivy",
+                    "rule_id": f"trivy.{rule}",
+                    "rule_name": title or rule,
+                    "severity": severity,
+                    "category": "secret",
+                    "message": message.strip(),
+                    "file_path": target,
+                    "line_start": secret.get("StartLine"),
+                    "line_end": secret.get("EndLine"),
+                    "col_start": None,
+                    "col_end": None,
+                    "matched_code": secret.get("Match"),
+                    "fingerprint": None,
+                    "cwe": None,
+                    "owasp": None,
+                    "references": None,
+                }
+            )
+
     return findings

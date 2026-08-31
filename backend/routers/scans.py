@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_db
 from models import Finding, Scan
-from services.scan_runner import get_raw_output_dir, request_cancel, run_scan
+from services import image_scanner
+from services.scan_runner import _FS_ONLY_TOOLS as FS_ONLY_TOOLS, get_raw_output_dir, request_cancel, run_scan
 
 import os
 _db_path = os.environ.get("SASTY_DB_PATH", "./sasty.db")
@@ -38,10 +39,25 @@ class ScanCreate(BaseModel):
     custom_commands: list[CustomCommand] | None = None
 
 
-def _scan_in_thread(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], tool_options: dict | None = None, custom_commands: list[dict] | None = None):
+class ImageScanCreate(BaseModel):
+    """Scan a container image by reference, e.g. objectide/objectide:latest."""
+    image: str
+    label: str | None = None
+    tools: list[str] = ["trivy"]
+    semgrep_configs: list[str] = ["auto"]
+    tool_options: dict[str, dict] | None = None
+    custom_commands: list[CustomCommand] | None = None
+    # Export the image filesystem so the secret/SAST scanners can run over it.
+    # Needs a docker CLI; trivy on its own does not.
+    extract_filesystem: bool = False
+
+
+def _scan_in_thread(scan_id: int, path: str, tools: list[str], semgrep_configs: list[str], tool_options: dict | None = None, custom_commands: list[dict] | None = None, image_ref: str | None = None, extract_filesystem: bool = False):
     db = SessionLocal()
     try:
-        run_scan(scan_id, path, tools, semgrep_configs, db, tool_options=tool_options, custom_commands=custom_commands)
+        run_scan(scan_id, path, tools, semgrep_configs, db, tool_options=tool_options,
+                 custom_commands=custom_commands, image_ref=image_ref,
+                 extract_filesystem=extract_filesystem)
     finally:
         db.close()
 
@@ -63,6 +79,7 @@ def create_scan(body: ScanCreate, background_tasks: BackgroundTasks, db: Session
     scan = Scan(
         path=path,
         label=body.label,
+        source_type="path",
         tools_used=body.tools,
         semgrep_configs=body.semgrep_configs,
     )
@@ -79,6 +96,72 @@ def create_scan(body: ScanCreate, background_tasks: BackgroundTasks, db: Session
         body.semgrep_configs,
         body.tool_options,
         custom_cmds,
+    )
+
+    return _scan_to_dict(scan)
+
+
+@router.get("/check-image")
+def check_image(image: str):
+    """Validate an image reference and report what can be scanned."""
+    try:
+        normalized = image_scanner.normalize_image_ref(image)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    backend = image_scanner.extraction_backend()
+    return {
+        "image": normalized,
+        "extract_available": backend is not None,
+        "extract_backend": backend,
+    }
+
+
+@router.post("/image", status_code=201)
+def create_image_scan(body: ImageScanCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Pull a container image by reference and scan it."""
+    try:
+        image_ref = image_scanner.normalize_image_ref(body.image)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    tools = list(body.tools)
+    if "trivy" not in tools:
+        # Trivy is the only scanner that reads the image itself; without it an
+        # image scan with no filesystem extraction would do nothing at all.
+        tools.insert(0, "trivy")
+
+    if body.extract_filesystem and image_scanner.extraction_backend() is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Filesystem extraction needs crane (install it from the Tools panel) "
+                   "or a reachable Docker daemon",
+        )
+
+    custom_cmds = [c.model_dump() for c in body.custom_commands] if body.custom_commands else None
+
+    scan = Scan(
+        path=image_ref,
+        label=body.label or image_ref,
+        source_type="image",
+        image_ref=image_ref,
+        tools_used=tools,
+        semgrep_configs=body.semgrep_configs,
+    )
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+
+    background_tasks.add_task(
+        _executor.submit,
+        _scan_in_thread,
+        scan.id,
+        image_ref,
+        tools,
+        body.semgrep_configs,
+        body.tool_options,
+        custom_cmds,
+        image_ref,
+        body.extract_filesystem,
     )
 
     return _scan_to_dict(scan)
@@ -106,6 +189,7 @@ async def upload_scan(
     scan = Scan(
         path="(uploading)",
         label=scan_label,
+        source_type="upload",
         tools_used=tools_list,
         semgrep_configs=configs_list,
     )
@@ -174,7 +258,8 @@ def rescan(scan_id: int, body: RescanRequest, background_tasks: BackgroundTasks,
     original = db.query(Scan).filter(Scan.id == scan_id).first()
     if not original:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if not Path(original.path).exists():
+    is_image = original.source_type == "image" and original.image_ref
+    if not is_image and not Path(original.path).exists():
         raise HTTPException(status_code=400, detail=f"Path no longer exists: {original.path}")
 
     tools = list(original.tools_used or [])
@@ -211,6 +296,8 @@ def rescan(scan_id: int, body: RescanRequest, background_tasks: BackgroundTasks,
     scan = Scan(
         path=original.path,
         label=base_label,
+        source_type=original.source_type or "path",
+        image_ref=original.image_ref,
         tools_used=tools,
         semgrep_configs=configs,
         parent_scan_id=root_id,
@@ -228,15 +315,20 @@ def rescan(scan_id: int, body: RescanRequest, background_tasks: BackgroundTasks,
         tools,
         configs,
         triage_map,
+        original.image_ref if is_image else None,
+        # Re-extract the filesystem only if the original scan used tools that
+        # need it, so a re-scan reproduces the same coverage.
+        bool(is_image and set(tools) & FS_ONLY_TOOLS),
     )
 
     return _scan_to_dict(scan)
 
 
-def _rescan_in_thread(scan_id: int, path: str, tools: list[str], configs: list[str], triage_map: dict[str, str]):
+def _rescan_in_thread(scan_id: int, path: str, tools: list[str], configs: list[str], triage_map: dict[str, str], image_ref: str | None = None, extract_filesystem: bool = False):
     db = SessionLocal()
     try:
-        run_scan(scan_id, path, tools, configs, db, triage_map=triage_map)
+        run_scan(scan_id, path, tools, configs, db, triage_map=triage_map, image_ref=image_ref,
+                 extract_filesystem=extract_filesystem)
     finally:
         db.close()
 
@@ -299,6 +391,7 @@ async def import_scan(
     scan = Scan(
         path="(imported)",
         label=scan_label,
+        source_type="import",
         tools_used=[tool_name],
         semgrep_configs=[],
         status="completed",
@@ -432,6 +525,8 @@ def _scan_to_dict(scan: Scan) -> dict:
         "id": scan.id,
         "path": scan.path,
         "label": scan.label,
+        "source_type": scan.source_type or "path",
+        "image_ref": scan.image_ref,
         "status": scan.status,
         "started_at": scan.started_at.isoformat() if scan.started_at else None,
         "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,

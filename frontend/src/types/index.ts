@@ -26,10 +26,14 @@ export interface ScanProgress {
   current_tool: string | null;
 }
 
+export type ScanSource = "path" | "upload" | "import" | "image";
+
 export interface Scan {
   id: number;
   path: string;
   label?: string;
+  source_type?: ScanSource;
+  image_ref?: string | null;
   status: ScanStatus;
   started_at: string;
   finished_at?: string;
